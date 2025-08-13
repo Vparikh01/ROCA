@@ -1,0 +1,7 @@
+alpha: 1.0
+beta: 2.0
+evaporation: 0.1
+Q: 100
+ants_per_iteration: 50
+Imax: 500
+seed: 42
