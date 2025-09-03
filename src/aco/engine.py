@@ -1,7 +1,7 @@
 import numpy as np
 from src.aco.pheromones import PheromoneMatrix
 from src.aco.ant import Ant
-from src.config import load_config
+from src.aco.config import load_config
 cfg = load_config()
 
 class MaxMinACO:

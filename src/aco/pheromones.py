@@ -1,5 +1,5 @@
 import numpy as np
-from src.config import load_config
+from src.aco.config import load_config
 cfg = load_config()
 
 class PheromoneMatrix:
