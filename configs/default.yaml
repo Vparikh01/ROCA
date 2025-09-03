@@ -1,7 +1,10 @@
 alpha: 1.0
 beta: 2.0
-evaporation: 0.1
-Q: 100
-ants_per_iteration: 50
-Imax: 500
+rho: 0.1 # evaporation rate
+q: 100 # pheromone deposit scaling
+num_ants: 50
+iterations: 500
 seed: 42
+tau:
+  min: 0.1
+  max: 10.0
