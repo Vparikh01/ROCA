@@ -34,9 +34,10 @@ class MaxMinACO:
             )
             for i in range(self.num_ants)
         ]
+        np.random.seed(cfg.get("seed") or 0)
 
-    def run(self, iterations=100):
-        for it in range(iterations):
+    def run(self, iterations=100, n=0):
+        for _ in range(iterations):
             self.best_iter_tour = None
             self.best_iter_length = float('inf')
             for ant in self.ants:
@@ -62,7 +63,7 @@ class MaxMinACO:
                 self.pheromones.deposit(self.best_tour, self.best_length)
             
             # Optional: stagnation check / dynamic tau adjustment could go here
-            print(f"Iteration {it}: Best length {self.best_length}")
+            print(f"Iteration {n+1}: Best length {self.best_length}")
 
     def calculate_tour_length(self, tour):
         length = 0

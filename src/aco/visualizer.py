@@ -28,30 +28,30 @@ def draw_aco_graph(G, pos, iteration_paths, final_best_path=None,
     )
 
     # ---------- Reduced graph edges with costs ----------
-    reduced_edge_traces = []
-    if edge_weights and required_nodes:
-        for (i, j), cost in edge_weights.items():
-            u, v = required_nodes[i], required_nodes[j]
-            x0, y0 = pos[u]
-            x1, y1 = pos[v]
-            # edge line
-            edge_trace = go.Scatter(
-                x=[x0, x1], y=[y0, y1],
-                line=dict(width=2, color='gray'),
-                mode='lines',
-                showlegend=False
-            )
-            # edge cost text at midpoint
-            mid_x, mid_y = (x0 + x1)/2, (y0 + y1)/2
-            text_trace = go.Scatter(
-                x=[mid_x], y=[mid_y],
-                text=[f"{cost:.1f}"],
-                mode="text",
-                showlegend=False,
-                textposition="middle center",
-                textfont=dict(color="green", size=10)
-            )
-            reduced_edge_traces += [edge_trace, text_trace]
+    # reduced_edge_traces = []
+    # if edge_weights and required_nodes:
+    #     for (i, j), cost in edge_weights.items():
+    #         u, v = required_nodes[i], required_nodes[j]
+    #         x0, y0 = pos[u]
+    #         x1, y1 = pos[v]
+    #         # edge line
+    #         edge_trace = go.Scatter(
+    #             x=[x0, x1], y=[y0, y1],
+    #             line=dict(width=2, color='gray'),
+    #             mode='lines',
+    #             showlegend=False
+    #         )
+    #         # edge cost text at midpoint
+    #         mid_x, mid_y = (x0 + x1)/2, (y0 + y1)/2
+    #         text_trace = go.Scatter(
+    #             x=[mid_x], y=[mid_y],
+    #             text=[f"{cost:.1f}"],
+    #             mode="text",
+    #             showlegend=False,
+    #             textposition="middle center",
+    #             textfont=dict(color="green", size=10)
+    #         )
+    #         reduced_edge_traces += [edge_trace, text_trace]
 
     # ---------- Required nodes ----------
     req_trace = None
@@ -85,13 +85,13 @@ def draw_aco_graph(G, pos, iteration_paths, final_best_path=None,
             name=f"Iteration {idx+1}",
             showlegend=True
         )
-        data = [base_edge_trace, path_trace] + reduced_edge_traces
+        data = [base_edge_trace, path_trace] #+ reduced_edge_traces
         if req_trace:
             data.append(req_trace)
         frames.append(go.Frame(name=str(idx), data=data))
 
     # ---------- Final best path ----------
-    final_frame_data = [base_edge_trace] + reduced_edge_traces
+    final_frame_data = [base_edge_trace] #+ reduced_edge_traces
     if final_best_path:
         x, y = [], []
         for k in range(len(final_best_path)-1):

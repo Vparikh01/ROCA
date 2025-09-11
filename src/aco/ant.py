@@ -9,7 +9,7 @@ class Ant:
         self.tour = [start_node]
         self.visited = set([start_node])
         self.tour_length = 0
-        self.graph: nx.Graph = graph  # type hint helps IDE
+        self.graph: nx.Graph = graph
         self.num_nodes = num_nodes
         self.rng = np.random.default_rng(seed)  # per-ant RNG for reproducibility
 
@@ -59,4 +59,4 @@ class Ant:
         self.current_node = next_node
         self.tour.append(next_node)
         self.visited.add(next_node)
-        return True  # indicate successful move
+        return True

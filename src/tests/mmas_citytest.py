@@ -1,4 +1,3 @@
-# ----------------- mmas_test.py -----------------
 import os
 import networkx as nx
 import numpy as np
@@ -11,7 +10,7 @@ from src.aco.astar import build_metric_closure
 
 # ------------------ Paths ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PALO_ALTO_PKL = os.path.join(BASE_DIR, "..", "datasets", "palo_alto_graph.pkl")
+PALO_ALTO_PKL = os.path.join(BASE_DIR, "..", "datasets", "sanjose_graph.pkl")
 
 def load_graph(pkl_path):
     with open(pkl_path, "rb") as f:
@@ -25,7 +24,7 @@ G = load_graph(PALO_ALTO_PKL)
 
 # Filter out very low-degree nodes
 node_degrees = dict(G.degree())
-significant_nodes = [n for n, deg in node_degrees.items() if deg > 1]
+significant_nodes = [n for n, deg in node_degrees.items() if deg > 0]
 if len(significant_nodes) > 10:
     G = G.subgraph(significant_nodes).copy()
 
@@ -43,7 +42,7 @@ if not pos:
     pos = nx.spring_layout(G, seed=42)
 
 # ----------------- Required Nodes -----------------
-required_nodes = random.sample(list(pos.keys()), 19)
+required_nodes = random.sample(list(pos.keys()), 29)
 start_node = required_nodes[0]  # first in the random list as start
 
 # ----------------- Cost Matrix & Reduced Graph -----------------
@@ -68,8 +67,8 @@ aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed)
 NUM_ITERATIONS = 200
 iteration_paths = []
 
-for _ in range(NUM_ITERATIONS):
-    aco.run(iterations=1)
+for n in range(NUM_ITERATIONS):
+    aco.run(iterations=1, n=n)
     best_iter_nodes = [required_nodes[i] for i in aco.best_iter_tour]
     full_path = []
     for k in range(len(best_iter_nodes)):

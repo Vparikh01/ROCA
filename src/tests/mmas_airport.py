@@ -1,4 +1,3 @@
-# ----------------- mmas_test.py -----------------
 import os
 import networkx as nx
 import numpy as np
@@ -25,7 +24,7 @@ G = load_graph(EURO_AIRPORT_PKL)
 
 # Filter out very low-degree nodes
 node_degrees = dict(G.degree())
-significant_nodes = [n for n, deg in node_degrees.items() if deg > 1]
+significant_nodes = [n for n, deg in node_degrees.items() if deg > 0]
 if len(significant_nodes) > 10:
     G = G.subgraph(significant_nodes).copy()
 
@@ -68,14 +67,14 @@ aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed)
 NUM_ITERATIONS = 200
 iteration_paths = []
 
-for _ in range(NUM_ITERATIONS):
-    aco.run(iterations=1)
+for n in range(NUM_ITERATIONS):
+    aco.run(iterations=1,n=n)
     best_iter_nodes = [required_nodes[i] for i in aco.best_iter_tour]
     full_path = []
     for k in range(len(best_iter_nodes)):
         u = best_iter_nodes[k]
         v = best_iter_nodes[(k+1) % len(best_iter_nodes)]
-        sp = nx.shortest_path(G, u, v)
+        sp = shortest_paths[(u, v)]
         full_path.extend(sp[:-1])
     full_path.append(start_node)
     iteration_paths.append(full_path)
@@ -86,7 +85,7 @@ final_full_path = []
 for k in range(len(final_best_nodes)):
     u = final_best_nodes[k]
     v = final_best_nodes[(k+1) % len(final_best_nodes)]
-    sp = nx.shortest_path(G, u, v)
+    sp = shortest_paths[(u, v)]
     final_full_path.extend(sp[:-1])
 final_full_path.append(start_node)
 

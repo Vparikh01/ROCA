@@ -98,12 +98,43 @@ def load_openflights_europe_airports_rich():
     airports_df = pd.read_csv(airports_url, header=None, names=cols_airports)
     routes_df = pd.read_csv(routes_url, header=None, names=cols_routes)
 
-    europe_countries = [
-        "France","Germany","United Kingdom","Italy","Spain","Netherlands",
-        "Belgium","Portugal","Sweden","Norway","Finland","Denmark","Austria",
-        "Switzerland","Poland","Czech Republic","Hungary","Greece","Ireland"
+    central_south_america_countries_with_airports = [
+    # Central America
+    "Belize",
+    "Costa Rica",
+    "El Salvador",
+    "Guatemala",
+    "Honduras",
+    "Nicaragua",
+    "Panama",
+
+    # South America
+    "Argentina",
+    "Bolivia",
+    "Brazil",
+    "Chile",
+    "Colombia",
+    "Ecuador",
+    "Guyana",
+    "Paraguay",
+    "Peru",
+    "Suriname",
+    "Uruguay",
+    "Venezuela",
+
+    # Caribbean South American states
+    "Aruba",
+    "Curacao",
+    "Saint Martin",   # Dutch side separate in OpenFlights
+    "Bonaire"
     ]
-    airports_df = airports_df[airports_df["Country"].isin(europe_countries)]
+    
+
+
+    airports_df = airports_df[
+    (airports_df["Lat"] >= -60) & (airports_df["Lat"] <= 15)  # Approx latitude bounds for Central/South America
+    ]
+    airports_df = airports_df[airports_df["Country"].isin(central_south_america_countries_with_airports)]
 
     G = nx.Graph()
     for _, row in airports_df.iterrows():
@@ -182,13 +213,13 @@ def visualize_europe_airports(G):
 # ------------------ Main ------------------
 
 if __name__ == "__main__":
-    print("Loading Palo Alto street network...")
-    G_map = load_palo_alto_drive_with_pois()
-    print(f"Palo Alto graph: {len(G_map.nodes)} nodes, {len(G_map.edges)} edges")
+    # print("Loading Palo Alto street network...")
+    # G_map = load_palo_alto_drive_with_pois()
+    # print(f"Palo Alto graph: {len(G_map.nodes)} nodes, {len(G_map.edges)} edges")
 
-    print("Saving Palo Alto graph to disk...")
-    with open("palo_alto_graph.pkl", "wb") as f:
-        pickle.dump(G_map, f)
+    # print("Saving Palo Alto graph to disk...")
+    # with open("palo_alto_graph.pkl", "wb") as f:
+    #     pickle.dump(G_map, f)
 
     print("Loading European airports network...")
     G_airports = load_openflights_europe_airports_rich()
@@ -198,10 +229,10 @@ if __name__ == "__main__":
     with open("europe_airports_graph.pkl", "wb") as f:
         pickle.dump(G_airports, f)
 
-    print("\nCreating visualizations...")
-    fig1, ax1 = visualize_palo_alto_network(G_map)
-    plt.figure(fig1.number)
-    plt.show()
+    # print("\nCreating visualizations...")
+    # fig1, ax1 = visualize_palo_alto_network(G_map)
+    # plt.figure(fig1.number)
+    # plt.show()
 
     fig2, ax2 = visualize_europe_airports(G_airports)
     plt.figure(fig2.number)
