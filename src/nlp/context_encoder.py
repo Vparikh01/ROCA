@@ -1,6 +1,7 @@
 import pickle
 import numpy as np
-from sentence_transformers import SentenceTransformer, util
+from InstructorEmbedding import INSTRUCTOR
+from sentence_transformers import util
 import os
 import matplotlib.pyplot as plt
 
@@ -18,98 +19,98 @@ def load_graph(pkl_path):
 graph = load_graph(PALO_ALTO_PKL)
 
 # ------------------- EXTRACT NODE TEXT -------------------
+# ------------------- EXTRACT POI NODE TEXT -------------------
 targets = []
 target_metadata = {}
 for node_id, node_data in graph.nodes(data=True):
+    if not node_data.get("is_poi", False):
+        continue  # skip non-POI nodes
+
     text_fields = []
-    # Use all available metadata fields
-    for k in node_data.keys():
-        if node_data.get(k):
-            if isinstance(node_data[k], dict):
-                text_fields.append(" ".join(str(v) for v in node_data[k].values()))
+    for k, v in node_data.items():
+        if v:
+            if isinstance(v, dict):
+                text_fields.append(" ".join(str(x) for x in v.values()))
             else:
-                text_fields.append(str(node_data[k]))
+                text_fields.append(str(v))
     combined_text = " ".join(text_fields).strip()
     if combined_text:
         targets.append(combined_text)
         target_metadata[combined_text] = node_data
 
+
 print(f"Total nodes with metadata: {len(targets)}")
 
-# ------------------- MODEL -------------------
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-# ------------------- INPUT INSTRUCTION -------------------
-instruction = "avoid gas stations"
+# ------------------- PRELOAD MODEL -------------------
+# Preload once to reuse across instructions
+model = INSTRUCTOR('hkunlp/instructor-large')
 
 # ------------------- INTENT PROTOTYPES -------------------
-intent_prototypes = {
+intent_templates = {
     "avoid": [
-        "avoid", "skip", "do not go", "forbid", "exclude", "stay away from",
-        "do not choose", "ignore", "ban", "prevent", "prohibit", "not allowed", 
-        "restricted", "off limits", "no entry", "disallow", "refrain", "sidestep", 
-        "evade", "shun", "omit", "leave out", "neglect", "refrain from", "pass over", 
-        "steer clear of", "keep clear", "block","do not enter", "do not select", 
-        "avoidance", "go around", "detour", "bypass", "skirt", "circumvent"
+        "avoid", "skip", "do not go", "go around", "bypass", "circumvent"
     ],
     "prefer": [
-        "prefer", "choose", "go to", "favor", "select", "opt for", "prioritize",
-        "seek", "aim for", "target", "like", "pick", "favoring", "recommend",
-        "desire", "wish for", "incline toward", "lean toward", "best choice",
-        "recommendation", "focus on", "highlight", "favoring", "go towards",
-        "preferably", "advocate", "encourage", "take", "selecting", "choose first"
+        "include", "prefer", "go to", "favor", "choose", "select"
     ]
 }
 
-# ------------------- ENCODINGS -------------------
-instruction_emb = model.encode(instruction, convert_to_tensor=True)
-target_embs = model.encode(targets, convert_to_tensor=True)
-avoid_embs = model.encode(intent_prototypes["avoid"], convert_to_tensor=True)
-prefer_embs = model.encode(intent_prototypes["prefer"], convert_to_tensor=True)
+# ------------------- FUNCTION: PROCESS INSTRUCTION -------------------
+def process_instruction(instruction, targets, model, intent_templates):
+    # Step 1: Extract target object embedding from instruction
+    instruction_emb = model.encode([
+        ("Extract the target   from this instruction:", instruction)
+    ])
+    
+    # Step 2: Determine intent type by comparing to avoid/prefer prototypes
+    avoid_embs = model.encode([("Represent the intent:", t) for t in intent_templates["avoid"]])
+    prefer_embs = model.encode([("Represent the intent:", t) for t in intent_templates["prefer"]])
+    
+    avoid_score = util.cos_sim(instruction_emb, avoid_embs).mean().item()
+    prefer_score = util.cos_sim(instruction_emb, prefer_embs).mean().item()
+    
+    intent_type = "avoid" if avoid_score > prefer_score else "prefer"
+    intent_multiplier = -1 if intent_type == "avoid" else 1
+    
+    # Step 3: Encode nodes relative to extracted target
+    target_node_embs = model.encode([
+        ("Represent the metadata of a node for matching this target object:", t) 
+        for t in targets
+    ])
+    
+    # Step 4: Similarity between instruction target and node metadata
+    node_sims = util.cos_sim(instruction_emb, target_node_embs)[0].cpu().numpy()
+    
+    # Step 5: Dynamic threshold (top 30%)
+    threshold = np.percentile(node_sims, 70)
+    max_sim_above_threshold = node_sims[node_sims >= threshold].max()
+    
+    # Step 6: Compute pheromone modifiers (smooth gradient)
+    pheromone_modifiers = {}
+    for t, sim in zip(targets, node_sims):
+        if sim < threshold:
+            modifier = 1.0
+        else:
+            sim_factor = (sim - threshold) / (max_sim_above_threshold - threshold)
+            sim_factor = sim_factor ** 1.8  # exaggerate outliers
+            modifier = 1 + intent_multiplier * sim_factor * 5
+            modifier = max(0.05, min(modifier, 2.0))
+        pheromone_modifiers[t] = modifier
+    
+    return intent_type, node_sims, pheromone_modifiers
 
-# ------------------- SIMILARITIES -------------------
-target_sims = util.cos_sim(instruction_emb, target_embs)[0].cpu().numpy()
+# ------------------- EXAMPLE INSTRUCTION -------------------
+instruction = "try to add movie theaters"
+intent_type, node_sims, pheromone_modifiers = process_instruction(instruction, targets, model, intent_templates)
 
-avoid_cos = util.cos_sim(instruction_emb, avoid_embs)
-prefer_cos = util.cos_sim(instruction_emb, prefer_embs)
+# ------------------- DISPLAY TOP MATCHES -------------------
+top_matches = sorted(zip(targets, node_sims), key=lambda x: x[1], reverse=True)[:100]
 
-avoid_score = 0.7 * avoid_cos.mean().item() + 0.3 * avoid_cos.max().item()
-prefer_score = 0.7 * prefer_cos.mean().item() + 0.3 * prefer_cos.max().item()
-
-intent_score = prefer_score - avoid_score
-intent_scaled = np.tanh(5 * intent_score)  # Range: -1 to 1
-
-# ------------------- PHEROMONE MODIFIERS -------------------
-pheromone_modifiers = {}
-baseline_sim = 0.25  # Only nodes with similarity above this are affected
-
-for t, sim in zip(targets, target_sims):
-    if sim < baseline_sim:
-        modifier = 1.0  # Neutral, no change
-    else:
-        # Exaggerate outliers using a non-linear transform
-        sim_factor = np.tanh(sim * 3) ** 2
-        modifier = 1 + intent_scaled * sim_factor * 5
-        modifier = max(0.05, min(modifier, 2.0))  # Clip to [0.05, 2.0]
-    pheromone_modifiers[t] = modifier
-
-# ------------------- TOP MATCHES -------------------
-if intent_scaled >= 0:
-    # Prefer instruction → top matches with highest similarity
-    top_matches = sorted(zip(targets, target_sims), key=lambda x: x[1], reverse=True)[:19]
-else:
-    # Avoid instruction → top nodes to avoid = highest similarity to avoid instruction
-    top_matches = sorted(zip(targets, target_sims), key=lambda x: x[1], reverse=True)[:19]
-
-print("\nTop 5 matches:")
+print(f"\nInstruction: '{instruction}' (inferred intent: {intent_type})")
 for t, sim in top_matches:
-    print(f"{t}: similarity {sim:.3f}")
-    print("Pheromone modifier:", round(pheromone_modifiers[t], 3))
+    print(f"{t}: similarity {sim:.3f}, modifier {round(pheromone_modifiers[t],3)}")
     print("Metadata:", target_metadata[t])
     print("---")
-
-print(f"\nModifier range: 0.05 (max avoid) → 2.0 (max prefer)")
-print(f"Intent score (scaled): {intent_scaled:.3f}")
 
 plt.hist(list(pheromone_modifiers.values()), bins=50)
 plt.title("Distribution of Pheromone Modifiers")
