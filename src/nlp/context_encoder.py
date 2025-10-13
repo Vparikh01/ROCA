@@ -4,6 +4,7 @@ from InstructorEmbedding import INSTRUCTOR
 from sentence_transformers import util
 import os
 import matplotlib.pyplot as plt
+import math
 
 # ------------------- LOAD GRAPH -------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,13 +19,12 @@ def load_graph(pkl_path):
 
 graph = load_graph(PALO_ALTO_PKL)
 
-# ------------------- EXTRACT NODE TEXT -------------------
 # ------------------- EXTRACT POI NODE TEXT -------------------
-targets = []
-target_metadata = {}
+node_info = {}  # node_id → {text, metadata, embedding, pheromone_modifier}
+
 for node_id, node_data in graph.nodes(data=True):
     if not node_data.get("is_poi", False):
-        continue  # skip non-POI nodes
+        continue
 
     text_fields = []
     for k, v in node_data.items():
@@ -34,85 +34,101 @@ for node_id, node_data in graph.nodes(data=True):
             else:
                 text_fields.append(str(v))
     combined_text = " ".join(text_fields).strip()
+
     if combined_text:
-        targets.append(combined_text)
-        target_metadata[combined_text] = node_data
+        node_info[node_id] = {
+            "text": combined_text,
+            "metadata": node_data,
+            "embedding": None,          # placeholder for model.encode
+            "pheromone_modifier": 1.0   # default neutral
+        }
 
-
-print(f"Total nodes with metadata: {len(targets)}")
+print(f"Total POI nodes: {len(node_info)}")
 
 # ------------------- PRELOAD MODEL -------------------
-# Preload once to reuse across instructions
 model = INSTRUCTOR('hkunlp/instructor-large')
 
 # ------------------- INTENT PROTOTYPES -------------------
 intent_templates = {
-    "avoid": [
-        "avoid", "skip", "do not go", "go around", "bypass", "circumvent"
-    ],
-    "prefer": [
-        "include", "prefer", "go to", "favor", "choose", "select"
-    ]
+    "avoid": ["avoid", "skip", "do not go", "go around", "bypass", "circumvent"],
+    "prefer": ["include", "prefer", "go to", "favor", "choose", "select"]
 }
 
 # ------------------- FUNCTION: PROCESS INSTRUCTION -------------------
-def process_instruction(instruction, targets, model, intent_templates):
-    # Step 1: Extract target object embedding from instruction
-    instruction_emb = model.encode([
-        ("Extract the target   from this instruction:", instruction)
-    ])
-    
-    # Step 2: Determine intent type by comparing to avoid/prefer prototypes
+def process_instruction(instruction, node_info, model, intent_templates):
+    node_ids = list(node_info.keys())
+    targets = [info["text"] for info in node_info.values()]
+
+    # Step 1: Encode instruction
+    instruction_emb = model.encode([("Extract the target from this instruction:", instruction)])
+
+    # Step 2: Encode intent prototypes
     avoid_embs = model.encode([("Represent the intent:", t) for t in intent_templates["avoid"]])
     prefer_embs = model.encode([("Represent the intent:", t) for t in intent_templates["prefer"]])
-    
+
     avoid_score = util.cos_sim(instruction_emb, avoid_embs).mean().item()
     prefer_score = util.cos_sim(instruction_emb, prefer_embs).mean().item()
-    
+
     intent_type = "avoid" if avoid_score > prefer_score else "prefer"
     intent_multiplier = -1 if intent_type == "avoid" else 1
-    
-    # Step 3: Encode nodes relative to extracted target
-    target_node_embs = model.encode([
-        ("Represent the metadata of a node for matching this target object:", t) 
-        for t in targets
+
+    raw_diff = avoid_score - prefer_score if intent_type == "avoid" else prefer_score - avoid_score
+    confidence = 1 / (1 + math.exp(-20 * raw_diff))  # sharp sigmoid
+
+    # Step 3: Encode node metadata
+    node_embs = model.encode([
+        ("Represent the metadata of a node for matching this target object:", text)
+        for text in targets
     ])
-    
-    # Step 4: Similarity between instruction target and node metadata
-    node_sims = util.cos_sim(instruction_emb, target_node_embs)[0].cpu().numpy()
-    
-    # Step 5: Dynamic threshold (top 30%)
+
+    # Step 4: Similarity computation
+    node_sims = util.cos_sim(instruction_emb, node_embs)[0].cpu().numpy()
+
+    # Step 5: Dynamic threshold
     threshold = np.percentile(node_sims, 70)
     max_sim_above_threshold = node_sims[node_sims >= threshold].max()
-    
-    # Step 6: Compute pheromone modifiers (smooth gradient)
-    pheromone_modifiers = {}
-    for t, sim in zip(targets, node_sims):
+
+    # Step 6: Compute modifiers & build consistent node_info_list
+    node_info_list = []
+    for node_id, sim in zip(node_ids, node_sims):
         if sim < threshold:
             modifier = 1.0
         else:
             sim_factor = (sim - threshold) / (max_sim_above_threshold - threshold)
-            sim_factor = sim_factor ** 1.8  # exaggerate outliers
+            sim_factor = sim_factor ** 1.8
             modifier = 1 + intent_multiplier * sim_factor * 5
             modifier = max(0.05, min(modifier, 2.0))
-        pheromone_modifiers[t] = modifier
-    
-    return intent_type, node_sims, pheromone_modifiers
+
+        # Update internal node_info
+        node_info[node_id]["pheromone_modifier"] = modifier
+
+        # Consistent output
+        node_info_list.append({
+            "node_id": node_id,
+            "text": node_info[node_id]["text"],
+            "metadata": node_info[node_id]["metadata"],
+            "similarity": sim,
+            "pheromone_modifier": modifier
+        })
+
+    return intent_type, confidence, node_info_list
 
 # ------------------- EXAMPLE INSTRUCTION -------------------
-instruction = "try to add movie theaters"
-intent_type, node_sims, pheromone_modifiers = process_instruction(instruction, targets, model, intent_templates)
+instruction = "include libraries"
+intent_type, confidence, node_info_list = process_instruction(
+    instruction, node_info, model, intent_templates
+)
 
 # ------------------- DISPLAY TOP MATCHES -------------------
-top_matches = sorted(zip(targets, node_sims), key=lambda x: x[1], reverse=True)[:100]
+sorted_nodes = sorted(node_info_list, key=lambda x: x["similarity"], reverse=True)[:100]
 
-print(f"\nInstruction: '{instruction}' (inferred intent: {intent_type})")
-for t, sim in top_matches:
-    print(f"{t}: similarity {sim:.3f}, modifier {round(pheromone_modifiers[t],3)}")
-    print("Metadata:", target_metadata[t])
+print(f"\nInstruction: '{instruction}' (inferred intent: {intent_type}, confidence: {confidence:.2f})")
+for node in sorted_nodes:
+    print(f"Node {node['node_id']}: similarity {node['similarity']:.3f}, modifier {node['pheromone_modifier']:.3f}")
+    print("Metadata:", node["metadata"])
     print("---")
 
-plt.hist(list(pheromone_modifiers.values()), bins=50)
+plt.hist([node["pheromone_modifier"] for node in node_info_list], bins=50)
 plt.title("Distribution of Pheromone Modifiers")
 plt.xlabel("Modifier")
 plt.ylabel("Number of nodes")

@@ -225,3 +225,7 @@ tmp/
 
 # Large raw datasets
 data/raw/
+
+# macOS system files
+.DS_Store
+src/.DS_Store
