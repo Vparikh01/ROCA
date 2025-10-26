@@ -20,7 +20,7 @@ class Ant:
         self.visited = set([self.start_node])
         self.tour_length = 0
 
-    def choose_next_node(self, pheromone_matrix, heuristic_matrix, alpha, beta):
+    def choose_next_node(self, pheromone_matrix, heuristic_matrix, alpha, beta, intent_matrix=None, upsilon=None):
         """
         Select the next node based on pheromone and heuristic matrices.
         Implements MMAS probability formula with per-ant RNG and roulette wheel selection.
@@ -38,7 +38,11 @@ class Ant:
         for neighbor in neighbors:
             tau = pheromone_matrix[self.current_node][neighbor]  # pheromone value
             eta = heuristic_matrix[self.current_node][neighbor]   # heuristic (1/cost)
-            probabilities[neighbor] = (tau ** alpha) * (eta ** beta)  # MMAS formula
+            if intent_matrix is not None and upsilon is not None:
+                pi = intent_matrix[self.current_node][neighbor]
+                probabilities[neighbor] = (tau ** alpha) * (eta ** beta) * (pi ** upsilon)
+            else:
+                probabilities[neighbor] = (tau ** alpha) * (eta ** beta)  # MMAS formula
 
         # Normalize probabilities to sum to 1
         probs = np.array(list(probabilities.values()))

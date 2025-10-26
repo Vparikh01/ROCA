@@ -7,10 +7,11 @@ from itertools import permutations
 from src.aco.visualizer import draw_aco_graph
 from src.aco.engine import MaxMinACO
 from src.aco.astar import build_metric_closure
+from src.nlp.matrix_visualizer import visualize_intent_matrix
 
 # ------------------ Paths ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EURO_AIRPORT_PKL = os.path.join(BASE_DIR, "..", "datasets", "europe_airports_graph.pkl")
+EURO_AIRPORTS_PKL = os.path.join(BASE_DIR, "..", "datasets", "europe_airports_graph.pkl")
 
 def load_graph(pkl_path):
     with open(pkl_path, "rb") as f:
@@ -20,7 +21,7 @@ def load_graph(pkl_path):
     return G
 
 # ------------------ Load and preprocess graph ------------------
-G = load_graph(EURO_AIRPORT_PKL)
+G = load_graph(EURO_AIRPORTS_PKL)
 
 # Filter out very low-degree nodes
 node_degrees = dict(G.degree())
@@ -42,8 +43,13 @@ if not pos:
     pos = nx.spring_layout(G, seed=42)
 
 # ----------------- Required Nodes -----------------
-required_nodes = random.sample(list(pos.keys()), 19)
-start_node = required_nodes[0]  # first in the random list as start
+# Pick the largest connected component
+largest_cc = max(nx.connected_components(G), key=len)
+subgraph_nodes = list(largest_cc)
+
+# Sample 29 nodes from this component
+required_nodes = random.sample(subgraph_nodes, 29)
+start_node = required_nodes[0]
 
 # ----------------- Cost Matrix & Reduced Graph -----------------
 cost_matrix, reduced_graph, shortest_paths = build_metric_closure(G, required_nodes)
@@ -63,21 +69,57 @@ edge_weights = {
 }
 
 # ----------------- Run ACO -----------------
-aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed)
+aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed, completeGraph=G, shortest_paths=shortest_paths, required_nodes=required_nodes, index_map=index_map)
 NUM_ITERATIONS = 200
 iteration_paths = []
 
 for n in range(NUM_ITERATIONS):
-    aco.run(iterations=1,n=n)
-    best_iter_nodes = [required_nodes[i] for i in aco.best_iter_tour]
-    full_path = []
-    for k in range(len(best_iter_nodes)):
-        u = best_iter_nodes[k]
-        v = best_iter_nodes[(k+1) % len(best_iter_nodes)]
-        sp = shortest_paths[(u, v)]
-        full_path.extend(sp[:-1])
-    full_path.append(start_node)
-    iteration_paths.append(full_path)
+    aco.run(iterations=1, n=n)
+    
+    # Check if we have a valid tour before processing
+    if aco.best_iter_tour is not None:
+        best_iter_nodes = [required_nodes[i] for i in aco.best_iter_tour]
+        full_path = []
+        for k in range(len(best_iter_nodes)):
+            u = best_iter_nodes[k]
+            v = best_iter_nodes[(k+1) % len(best_iter_nodes)]
+            try:
+                sp = nx.shortest_path(G, u, v)
+                full_path.extend(sp[:-1])
+            except nx.NetworkXNoPath:
+                print(f"Warning: No path between {u} and {v} after exclusion")
+                full_path = []
+                break
+        
+        if full_path:
+            full_path.append(start_node)
+            iteration_paths.append(full_path)
+        else:
+            # No valid path, append empty or use last valid path
+            if iteration_paths:
+                iteration_paths.append(iteration_paths[-1])  # Repeat last valid
+            else:
+                iteration_paths.append([])
+    else:
+        # No valid tour this iteration
+        print(f"Skipping path construction for iteration {n+1} (no valid tour)")
+        if iteration_paths:
+            iteration_paths.append(iteration_paths[-1])  # Repeat last valid path
+        else:
+            iteration_paths.append([])
+    
+    if n == 50:
+        NUM_ITERATIONS += n
+        aco.apply_instruction("avoid eastern europe")
+        # Update cost_matrix and G_indexed to reflect exclusions
+        cost_matrix = aco.cost_matrix  # Get updated cost matrix
+        
+        # Rebuild G_indexed with updated costs
+        G_indexed = nx.Graph()
+        for i in range(num_nodes):
+            for j in range(i+1, num_nodes):
+                if not np.isinf(cost_matrix[i][j]):
+                    G_indexed.add_edge(i, j, weight=cost_matrix[i][j])
 
 # Final best path
 final_best_nodes = [required_nodes[i] for i in aco.best_tour]
@@ -85,7 +127,7 @@ final_full_path = []
 for k in range(len(final_best_nodes)):
     u = final_best_nodes[k]
     v = final_best_nodes[(k+1) % len(final_best_nodes)]
-    sp = shortest_paths[(u, v)]
+    sp = nx.shortest_path(G, u, v)
     final_full_path.extend(sp[:-1])
 final_full_path.append(start_node)
 
@@ -105,7 +147,7 @@ if num_nodes <= 9:
 else:
     # Large: use NetworkX TSP approximation
     approx_tour = nx.approximation.traveling_salesman_problem(
-        G_indexed, cycle=True, weight="weight", method=nx.approximation.christofides
+        G_indexed, cycle=True, weight="weight", method=nx.approximation.christofides, 
     )
     opt_tour_idx = approx_tour
     opt_cost = sum(cost_matrix[approx_tour[i]][approx_tour[(i+1)%num_nodes]] for i in range(num_nodes))
@@ -133,4 +175,10 @@ draw_aco_graph(
     required_nodes=required_nodes,
     edge_weights=edge_weights,
     optimal_path=optimal_full_path
+)
+
+visualize_intent_matrix(
+    aco.negative_intent.matrix,
+    num_nodes,
+    aco.intent_type
 )
