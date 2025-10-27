@@ -2,6 +2,7 @@ import numpy as np
 import networkx as nx
 from src.aco.pheromones import PheromoneMatrix
 from src.nlp.negative_intents import NegativeIntentMatrix
+from src.nlp.positive_intents import PositiveIntentMatrix
 from src.aco.ant import Ant
 from src.aco.config import load_config
 from src.nlp.context_encoder import process_instruction
@@ -13,6 +14,7 @@ cfg = load_config()
 class MaxMinACO:
     def __init__(self, cost_matrix, start_node, reducedGraph, completeGraph, shortest_paths, required_nodes, index_map):
         self.cost_matrix = cost_matrix
+        self.start_node = start_node
         self.num_nodes = len(cost_matrix)
         self.num_ants = min(cfg["num_ants"], self.num_nodes)
         self.alpha = cfg["alpha"]
@@ -22,6 +24,7 @@ class MaxMinACO:
         expected_length = max(np.mean(positive_costs) * self.num_nodes, 1e-6)
         self.pheromones = PheromoneMatrix(self.num_nodes, cfg["rho"], expected_length)
         self.negative_intent = None  # to be set via instruction
+        self.positive_intent = None  # to be set via instruction
         self.shortest_paths = shortest_paths
         unique_nodes = set().union(*self.shortest_paths.values())
         self.completeGraph = completeGraph
@@ -42,7 +45,7 @@ class MaxMinACO:
         self.best_length = float('inf')
         self.ants = [
             Ant(
-                start_node=start_node,
+                start_node=self.start_node,
                 num_nodes=self.num_nodes,
                 graph=reducedGraph,
                 seed=(cfg.get("seed") or 0) + i  # per-ant reproducible RNG
@@ -130,7 +133,61 @@ class MaxMinACO:
             print(f"Final ACO Best Length: {self.best_length:.3f}")
 
         else:
-            print(f"Positive intent not yet implemented: {intent_type}")
+            print(f"\n{'='*60}\nAPPLYING PREFER INSTRUCTION: '{instruction}'\n{'='*60}")
+            self.positive_intent = PositiveIntentMatrix(self.num_nodes)
+            nodes_added = 0
+            min_nodes_to_add = self.compute_num_nodes_to_add()
+            threshold = 0.95
+
+            current_opt_nodes = [self.required_nodes[i] for i in self.best_tour]
+            current_opt_path = []
+            for k in range(len(current_opt_nodes)):
+                u = current_opt_nodes[k]
+                v = current_opt_nodes[(k+1) % len(current_opt_nodes)]
+                sp = nx.shortest_path(self.completeGraph, u, v)
+                current_opt_path.extend(sp[:-1])
+            current_opt_path.append(self.start_node)
+
+            # create subset of significant_nodes whose node_id is in current_opt_path
+            sig_map = {n["node_id"]: n for n in significant_nodes}
+            subset = [
+                sig_map[node_id]
+                for node_id in current_opt_path
+                if node_id in sig_map
+            ]
+
+            # nodes in current optimal path
+            stage1_modifiers = {
+                n["node_id"]: self.map_modifier_to_positive_value(n["pheromone_modifier"])
+                for n in subset
+            }
+            print("Stage 1 Modifiers:")
+            for node_id, modifier in stage1_modifiers.items():
+                print(f"  Node {node_id}: {modifier:.3f} | Metadata: {sig_map[node_id]['metadata']}")
+
+            # nodes in current shortest paths
+            stage2_modifiers = {
+                n["node_id"]: self.map_modifier_to_positive_value(n["pheromone_modifier"])
+                for n in significant_nodes
+            }
+
+            for node_id, modifier in stage2_modifiers.items():
+                if modifier >= threshold:
+                    nodes_added += 1
+                    print(f"Node considered: {node_id}")
+                    print(f"Metadata: {sig_map[node_id]['metadata']}")
+                    print(f"Modifier: {modifier:.3f}")
+                    
+                if nodes_added >= min_nodes_to_add:
+                    # TODO: Rethink if this is too lenient
+                    print("Enough nodes already present in current shortest paths.")
+                    break
+                
+            #TODO: now create queue and start adding nodes until min_nodes_to_add is reached
+            #Sorted by 1) cost in order closest to current optimal solution paths
+            #          2) cost in order of closest to ANY shortest path part of the shortest paths list
+
+            print(f"Significant nodes: {len(significant_nodes)} | Mod range: [{min(stage2_modifiers.values()):.3f}, {max(stage2_modifiers.values()):.3f}]")
 
         print(f"\nInstruction Summary:\n  Intent: {intent_type}\n  Confidence: {confidence:.3f}")
 
@@ -213,3 +270,12 @@ class MaxMinACO:
             return float('inf')
         
         return length + final_cost
+    
+    def compute_num_nodes_to_add(self):
+        """Heuristic: how many nodes to add. Conservative growth with problem size."""
+        return max(1, int(np.ceil(np.sqrt(self.num_nodes))+10))
+    
+    def map_modifier_to_positive_value(self, modifier):
+        # map [1, 2] → [0, 1], anything <1 → 0
+        value = max(0.0, min(modifier - 1.0, 1.0))
+        return float(value)

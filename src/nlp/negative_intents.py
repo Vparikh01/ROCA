@@ -1,5 +1,4 @@
 import numpy as np
-from src.aco.config import load_config
 
 class NegativeIntentMatrix:
     """

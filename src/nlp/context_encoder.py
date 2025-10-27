@@ -118,7 +118,8 @@ def process_instruction(instruction, node_info):
         if sim < threshold:
             modifier = 1.0
         else:
-            sim_factor = (sim - threshold) / (max_sim_above_threshold - threshold)
+            denom = max(1e-12, max_sim_above_threshold - threshold)
+            sim_factor = (sim - threshold) / denom
             sim_factor = sim_factor ** 1.8
             modifier = 1 + intent_multiplier * sim_factor * 5
             modifier = max(0.05, min(modifier, 2.0))
@@ -142,7 +143,7 @@ if __name__ == "__main__":
     graph = load_graph(PALO_ALTO_PKL)
     node_info = extract_node_info(graph)
 
-    instruction = "add libraries"
+    instruction = "include libraries"
     intent_type, confidence, node_info_list = process_instruction(
         instruction, node_info
     )

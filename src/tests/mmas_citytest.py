@@ -110,7 +110,7 @@ for n in range(NUM_ITERATIONS):
     
     if n == 50:
         NUM_ITERATIONS += n
-        aco.apply_instruction("avoid libraries")
+        aco.apply_instruction("include libraries")
         # Update cost_matrix and G_indexed to reflect exclusions
         cost_matrix = aco.cost_matrix  # Get updated cost matrix
         
@@ -177,8 +177,15 @@ draw_aco_graph(
     optimal_path=optimal_full_path
 )
 
-visualize_intent_matrix(
-    aco.negative_intent.matrix,
-    num_nodes,
-    aco.intent_type
-)
+if aco.negative_intent is not None:
+    visualize_intent_matrix(
+        aco.negative_intent.matrix,
+        num_nodes,
+        aco.intent_type
+    )
+if aco.positive_intent is not None:
+    visualize_intent_matrix(
+        aco.positive_intent.matrix,
+        num_nodes,
+        aco.intent_type
+    )
