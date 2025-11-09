@@ -11,7 +11,7 @@ from src.nlp.matrix_visualizer import visualize_intent_matrix
 
 # ------------------ Paths ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EURO_AIRPORTS_PKL = os.path.join(BASE_DIR, "..", "datasets", "europe_airports_graph.pkl")
+EUROPE_AIRPORTS_PKL = os.path.join(BASE_DIR, "..", "datasets", "europe_airports_graph.pkl")
 
 def load_graph(pkl_path):
     with open(pkl_path, "rb") as f:
@@ -21,7 +21,7 @@ def load_graph(pkl_path):
     return G
 
 # ------------------ Load and preprocess graph ------------------
-G = load_graph(EURO_AIRPORTS_PKL)
+G = load_graph(EUROPE_AIRPORTS_PKL)
 
 # Filter out very low-degree nodes
 node_degrees = dict(G.degree())
@@ -73,6 +73,11 @@ aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed, completeGraph
 NUM_ITERATIONS = 200
 iteration_paths = []
 
+# Helper function to get the correct graph for path computation
+def get_active_graph():
+    """Returns the filtered graph if exclusions were applied, otherwise the original graph."""
+    return getattr(aco, 'completeGraph_filtered', G)
+
 for n in range(NUM_ITERATIONS):
     aco.run(iterations=1, n=n)
     
@@ -80,16 +85,27 @@ for n in range(NUM_ITERATIONS):
     if aco.best_iter_tour is not None:
         best_iter_nodes = [required_nodes[i] for i in aco.best_iter_tour]
         full_path = []
+        active_graph = get_active_graph()  # Use filtered graph if available
+        
         for k in range(len(best_iter_nodes)):
             u = best_iter_nodes[k]
             v = best_iter_nodes[(k+1) % len(best_iter_nodes)]
-            try:
-                sp = nx.shortest_path(G, u, v)
-                full_path.extend(sp[:-1])
-            except nx.NetworkXNoPath:
-                print(f"Warning: No path between {u} and {v} after exclusion")
+            
+            # First try cached shortest_paths (which are updated by ACO)
+            if (u, v) in aco.shortest_paths and aco.shortest_paths[(u, v)]:
+                sp = aco.shortest_paths[(u, v)]
+            else:
+                # Fall back to computing on active graph
+                try:
+                    sp = nx.shortest_path(active_graph, u, v, weight='weight')
+                except nx.NetworkXNoPath:
+                    print(f"Warning: No path between {u} and {v}")
+                    sp = []
+            
+            if not sp:
                 full_path = []
                 break
+            full_path.extend(sp[:-1])
         
         if full_path:
             full_path.append(start_node)
@@ -121,15 +137,31 @@ for n in range(NUM_ITERATIONS):
                 if not np.isinf(cost_matrix[i][j]):
                     G_indexed.add_edge(i, j, weight=cost_matrix[i][j])
 
-# Final best path
+# Final best path - use active graph
 final_best_nodes = [required_nodes[i] for i in aco.best_tour]
 final_full_path = []
+active_graph = get_active_graph()
+
 for k in range(len(final_best_nodes)):
     u = final_best_nodes[k]
     v = final_best_nodes[(k+1) % len(final_best_nodes)]
-    sp = nx.shortest_path(G, u, v)
-    final_full_path.extend(sp[:-1])
-final_full_path.append(start_node)
+    
+    if (u, v) in aco.shortest_paths and aco.shortest_paths[(u, v)]:
+        sp = aco.shortest_paths[(u, v)]
+    else:
+        try:
+            sp = nx.shortest_path(active_graph, u, v, weight='weight')
+        except nx.NetworkXNoPath:
+            print(f"Warning: No path between {u} and {v} in final path")
+            sp = []
+    
+    if sp:
+        final_full_path.extend(sp[:-1])
+    else:
+        break
+
+if final_full_path:
+    final_full_path.append(start_node)
 
 # ----------------- Compute True Optimal -----------------
 if num_nodes <= 9:
@@ -152,18 +184,34 @@ else:
     opt_tour_idx = approx_tour
     opt_cost = sum(cost_matrix[approx_tour[i]][approx_tour[(i+1)%num_nodes]] for i in range(num_nodes))
 
-# Map optimal tour back to node labels
+# Map optimal tour back to node labels - use active graph
 optimal_nodes = [required_nodes[i] for i in opt_tour_idx]
 optimal_full_path = []
+
 for k in range(len(optimal_nodes)):
     u = optimal_nodes[k]
     v = optimal_nodes[(k+1) % len(optimal_nodes)]
-    sp = nx.shortest_path(G, u, v)
-    optimal_full_path.extend(sp[:-1])
-optimal_full_path.append(start_node)
+    
+    if (u, v) in aco.shortest_paths and aco.shortest_paths[(u, v)]:
+        sp = aco.shortest_paths[(u, v)]
+    else:
+        try:
+            sp = nx.shortest_path(active_graph, u, v, weight='weight')
+        except nx.NetworkXNoPath:
+            print(f"Warning: No path between {u} and {v} in optimal path")
+            sp = []
+    
+    if sp:
+        optimal_full_path.extend(sp[:-1])
+    else:
+        break
+
+if optimal_full_path:
+    optimal_full_path.append(start_node)
 
 # ----------------- Output -----------------
 print(f"ACO Best Length: {sum(cost_matrix[aco.best_tour[i]][aco.best_tour[(i+1)%num_nodes]] for i in range(num_nodes)):.2f}")
+print(f"ACO Post-Instruction Best Length: {sum(cost_matrix[aco.post_instruction_best_tour[i]][aco.post_instruction_best_tour[(i+1)%num_nodes]] for i in range(num_nodes)):.2f}")
 print(f"Optimal Tour Length: {opt_cost:.2f}")
 
 # ----------------- Visualize -----------------
@@ -174,11 +222,20 @@ draw_aco_graph(
     final_best_path=final_full_path,
     required_nodes=required_nodes,
     edge_weights=edge_weights,
-    optimal_path=optimal_full_path
+    optimal_path=optimal_full_path,
+    added_nodes=list(aco.added_nodes_set) if hasattr(aco, 'added_nodes_set') else [],
+    removed_nodes=list(aco.safe) if hasattr(aco, 'safe') else []
 )
 
-visualize_intent_matrix(
-    aco.negative_intent.matrix,
-    num_nodes,
-    aco.intent_type
-)
+if aco.negative_intent is not None:
+    visualize_intent_matrix(
+        aco.negative_intent.matrix,
+        num_nodes,
+        aco.intent_type
+    )
+if aco.positive_intent is not None:
+    visualize_intent_matrix(
+        aco.positive_intent.matrix,
+        num_nodes,
+        aco.intent_type
+    )

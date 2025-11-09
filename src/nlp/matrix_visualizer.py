@@ -1,43 +1,47 @@
 import matplotlib.pyplot as plt
-import networkx as nx
 import numpy as np
 
 def visualize_intent_matrix(matrix, num_nodes, intent_type, save_path=None):
     """
-    Visualize as sorted edge list - most space efficient
+    Visualize as sorted edge list - works for both negative and positive intent.
+    
+    Negative: lower values → more avoided, higher → neutral.
+    Positive: higher values → more preferred, lower → neutral.
     """
     if matrix is None:
-        print("No negative intent matrix to visualize")
+        print("No intent matrix to visualize")
         return
     
-    # Get unique paths
-    upper_triangle_mask = np.triu(np.ones_like(matrix, dtype=bool), k=1)
-    
-    # Extract all path info
+    # Extract all upper-triangle paths
     paths = []
     for i in range(num_nodes):
         for j in range(i+1, num_nodes):
             paths.append((i, j, matrix[i][j]))
     
     # Sort by modifier value
-    paths.sort(key=lambda x: x[2])
+    paths.sort(key=lambda x: x[2], reverse=(intent_type == "positive"))
     
     fig, axes = plt.subplots(2, 1, figsize=(14, 10))
     
     # Plot 1: All paths sorted (bar chart)
     ax1 = axes[0]
-    
     modifiers = [p[2] for p in paths]
-    colors = ['red' if m < 0.05 else 'orange' if m < 0.5 else 'yellow' if m < 0.8 else 'green' 
-              for m in modifiers]
+    
+    if intent_type == "negative":
+        colors = ['red' if m < 0.05 else 'orange' if m < 0.5 else 'yellow' if m < 0.8 else 'green' 
+                  for m in modifiers]
+        ax1.axhline(0.05, color='red', linestyle='--', linewidth=2, label='Exclusion (0.05)')
+        ax1.axhline(0.5, color='orange', linestyle='--', linewidth=1.5, label='Strong avoidance (0.5)')
+        ax1.axhline(1.0, color='green', linestyle='--', linewidth=2, label='Neutral (1.0)')
+    else:  # positive intent
+        colors = ['green' if m > 0.8 else 'yellow' if m > 0.5 else 'orange' if m > 0.05 else 'red' 
+                  for m in modifiers]
+        ax1.axhline(0.05, color='red', linestyle='--', linewidth=2, label='Neutral/low (0.05)')
+        ax1.axhline(0.5, color='orange', linestyle='--', linewidth=1.5, label='Moderate (0.5)')
+        ax1.axhline(0.8, color='green', linestyle='--', linewidth=2, label='Strong preference (0.8)')
     
     x_pos = np.arange(len(paths))
     ax1.bar(x_pos, modifiers, color=colors, alpha=0.7, edgecolor='black', linewidth=0.5)
-    
-    ax1.axhline(0.05, color='red', linestyle='--', linewidth=2, label='Exclusion (0.05)')
-    ax1.axhline(0.5, color='orange', linestyle='--', linewidth=1.5, label='Strong avoidance (0.5)')
-    ax1.axhline(1.0, color='green', linestyle='--', linewidth=2, label='Neutral (1.0)')
-    
     ax1.set_xlabel('Path Index (sorted by modifier)')
     ax1.set_ylabel('Pheromone Modifier')
     ax1.set_title(f'All Paths Sorted by Intent Strength\n({intent_type})', fontweight='bold')
@@ -47,42 +51,57 @@ def visualize_intent_matrix(matrix, num_nodes, intent_type, save_path=None):
     
     # Plot 2: Top/Bottom paths details
     ax2 = axes[1]
-    
-    # Show top 20 most avoided and top 10 most neutral
     n_show = min(20, len(paths))
-    most_avoided = paths[:n_show]
-    most_neutral = paths[-10:] if len(paths) > 10 else []
     
-    # Combine for display
+    if intent_type == "negative":
+        most_avoided = paths[:n_show]
+        most_neutral = paths[-10:] if len(paths) > 10 else []
+    else:  # positive
+        most_preferred = paths[:n_show]
+        most_neutral = paths[-10:] if len(paths) > 10 else []
+        most_avoided = [(p[0], p[1], 1-p[2]) for p in most_preferred]  # for display, invert for bar color logic
+    
     display_paths = most_avoided + [('---', '---', None)] + most_neutral[::-1]
     
     y_pos = np.arange(len(display_paths))
     labels = [f"{p[0]}→{p[1]}" if p[2] is not None else "..." for p in display_paths]
     values = [p[2] if p[2] is not None else 0.5 for p in display_paths]
-    colors_detail = ['red' if v < 0.05 else 'orange' if v < 0.5 else 'yellow' if v < 0.8 else 'green' 
-                     for v in values]
+    
+    if intent_type == "negative":
+        colors_detail = ['red' if v < 0.05 else 'orange' if v < 0.5 else 'yellow' if v < 0.8 else 'green' 
+                         for v in values]
+    else:
+        colors_detail = ['green' if v > 0.8 else 'yellow' if v > 0.5 else 'orange' if v > 0.05 else 'red' 
+                         for v in values]
     
     ax2.barh(y_pos, values, color=colors_detail, alpha=0.7, edgecolor='black')
     ax2.set_yticks(y_pos)
     ax2.set_yticklabels(labels, fontsize=8)
-    ax2.axvline(0.05, color='red', linestyle='--', linewidth=2, alpha=0.5)
-    ax2.axvline(0.5, color='orange', linestyle='--', linewidth=1.5, alpha=0.5)
-    ax2.axvline(1.0, color='green', linestyle='--', linewidth=2, alpha=0.5)
+    
+    if intent_type == "negative":
+        ax2.axvline(0.05, color='red', linestyle='--', linewidth=2, alpha=0.5)
+        ax2.axvline(0.5, color='orange', linestyle='--', linewidth=1.5, alpha=0.5)
+        ax2.axvline(1.0, color='green', linestyle='--', linewidth=2, alpha=0.5)
+    else:
+        ax2.axvline(0.05, color='red', linestyle='--', linewidth=2, alpha=0.5)
+        ax2.axvline(0.5, color='orange', linestyle='--', linewidth=1.5, alpha=0.5)
+        ax2.axvline(0.8, color='green', linestyle='--', linewidth=2, alpha=0.5)
+    
     ax2.set_xlabel('Pheromone Modifier')
-    ax2.set_title(f'Top {n_show} Most Avoided Paths (top) & Top 10 Neutral Paths (bottom)')
+    ax2.set_title(f'Top {n_show} Significant Paths (top) & Top 10 Neutral Paths (bottom)')
     ax2.invert_yaxis()
     ax2.grid(True, alpha=0.3, axis='x')
     
-    # Add statistics box
+    # Stats box
     modifiers_array = np.array([p[2] for p in paths])
     stats_text = f"""
     Total paths: {len(paths)}
     Mean: {np.mean(modifiers_array):.3f}
     Median: {np.median(modifiers_array):.3f}
     
-    Excluded (<0.05): {np.sum(modifiers_array < 0.05)} ({100*np.sum(modifiers_array < 0.05)/len(paths):.1f}%)
-    Avoided (<0.5): {np.sum(modifiers_array < 0.5)} ({100*np.sum(modifiers_array < 0.5)/len(paths):.1f}%)
-    Neutral (≥0.8): {np.sum(modifiers_array >= 0.8)} ({100*np.sum(modifiers_array >= 0.8)/len(paths):.1f}%)
+    Low (<0.05): {np.sum(modifiers_array < 0.05)} ({100*np.sum(modifiers_array < 0.05)/len(paths):.1f}%)
+    Medium (<0.5): {np.sum(modifiers_array < 0.5)} ({100*np.sum(modifiers_array < 0.5)/len(paths):.1f}%)
+    High (>=0.8): {np.sum(modifiers_array >= 0.8)} ({100*np.sum(modifiers_array >= 0.8)/len(paths):.1f}%)
     """
     fig.text(0.98, 0.5, stats_text, transform=fig.transFigure,
              verticalalignment='center', horizontalalignment='right',

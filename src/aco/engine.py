@@ -8,6 +8,8 @@ from src.aco.config import load_config
 from src.nlp.context_encoder import process_instruction
 from src.nlp.context_encoder import extract_node_info
 from src.aco.astar import exclusion_closure_update
+from src.aco.astar import inclusion_closure_update
+from src.aco.astar import inclusion_filter
 
 cfg = load_config()
 
@@ -43,6 +45,8 @@ class MaxMinACO:
                     self.heuristic[i][j] = 0  # prevents huge values
         self.best_tour = None
         self.best_length = float('inf')
+        self.post_instruction_best_tour = None
+        self.post_instruction_best_length = float('inf')
         self.ants = [
             Ant(
                 start_node=self.start_node,
@@ -65,6 +69,7 @@ class MaxMinACO:
             instruction, self.node_info
         )
         self.intent_type, self.confidence, self.significant_nodes = intent_type, confidence, significant_nodes
+        self.significant_map = {n["node_id"]: n for n in self.significant_nodes}
 
         if intent_type == "avoid":
             print(f"\n{'='*60}\nAPPLYING AVOID INSTRUCTION: '{instruction}'\n{'='*60}")
@@ -89,49 +94,63 @@ class MaxMinACO:
             if excluded:
                 G = self.completeGraph.copy()
                 safe = []
+                unsafe = []
+                
                 for node in excluded:
                     G_temp = G.copy()
                     G_temp.remove_node(node)
                     if nx.is_connected(G_temp):
-                        G = G_temp  # commit removal
                         safe.append(node)
-                print(f"Safe exclusions (iterative): {len(safe)}/{len(excluded)}")
+                        G = G_temp
+                    else:
+                        unsafe.append(node)  # will remove anyway with fallback
 
-                if safe:
-                    self.cost_matrix, self.shortest_paths = exclusion_closure_update(
-                        self.completeGraph, self.required_nodes, self.cost_matrix, self.shortest_paths, safe, self.index_map
-                    )
-                    for i in range(self.num_nodes):
-                        for j in range(self.num_nodes):
-                            if i == j: self.heuristic[i][j] = 0
-                            elif self.cost_matrix[i][j] > 0: self.heuristic[i][j] = 1 / self.cost_matrix[i][j]
-                            else: self.heuristic[i][j] = 0
-                    print("Connectivity OK → Hard exclusions applied")
-                else:
-                    print("No safe exclusions found → Soft penalties only")
-                    print("\n--- Attempting Hard Exclusion Debug Info ---")
-                    for node in excluded:
-                        data = self.completeGraph.nodes[node]
-                        print(f"\nNode: {node}")
-                        for k, v in data.items():
-                            print(f"  {k}: {v}")
-                    print("--- End of Exclusion Node Attributes ---\n")
-            else:
-                print("No nodes to exclude")
-            
-            # Resynchronize best_length and tour after exclusion closure
-            if self.best_tour is not None:
-                new_cost = sum(
-                    self.cost_matrix[self.best_tour[i]][self.best_tour[i+1]]
-                    for i in range(len(self.best_tour)-1)
-                ) + self.cost_matrix[self.best_tour[-1]][self.best_tour[0]]
+                print(f"Safe exclusions: {len(safe)} | Unsafe exclusions: {len(unsafe)}")
 
-                if abs(new_cost - self.best_length) > 1e-6:
-                    print(f"[Sync] Adjusting best_length: {self.best_length:.3f} → {new_cost:.3f}")
-                    self.best_length = new_cost
+                # remove all nodes anyway, using fallback for unsafe ones
+                all_to_remove = safe + unsafe
+                G_filtered = self.completeGraph.copy()
+                G_filtered.remove_nodes_from(all_to_remove)
 
-            print(f"Final ACO Best Length: {self.best_length:.3f}")
+                # update closures for safe + unsafe nodes
+                new_cost, new_shortest_paths, _ = exclusion_closure_update(
+                    self.completeGraph, self.required_nodes, self.cost_matrix, self.shortest_paths, all_to_remove, self.index_map
+                )
 
+                # fallback: recompute broken paths only
+                broken_pairs = [
+                    (u, v) for u in self.required_nodes for v in self.required_nodes
+                    if u != v and ((u, v) not in new_shortest_paths or not new_shortest_paths[(u, v)])
+                ]
+                for u, v in broken_pairs:
+                    try:
+                        sp = nx.shortest_path(G_filtered, u, v, weight='weight')
+                        new_shortest_paths[(u, v)] = sp
+                        new_cost[self.index_map[u], self.index_map[v]] = sum(
+                            self.cost_matrix[self.index_map[sp[i]], self.index_map[sp[i+1]]]
+                            for i in range(len(sp)-1)
+                        )
+                    except nx.NetworkXNoPath:
+                        new_shortest_paths[(u, v)] = []
+                        new_cost[self.index_map[u], self.index_map[v]] = float('inf')
+
+                # overwrite internals
+                self.cost_matrix = new_cost
+                self.shortest_paths = new_shortest_paths
+                self.completeGraph_filtered = G_filtered
+
+                # update heuristics
+                for i in range(self.num_nodes):
+                    for j in range(self.num_nodes):
+                        if i == j:
+                            self.heuristic[i][j] = 0
+                        elif self.cost_matrix[i][j] > 0:
+                            self.heuristic[i][j] = 1 / self.cost_matrix[i][j]
+                        else:
+                            self.heuristic[i][j] = 0
+
+                print("Hard exclusions applied with partial fallback for broken paths")
+                self.safe = safe + unsafe
         else:
             print(f"\n{'='*60}\nAPPLYING PREFER INSTRUCTION: '{instruction}'\n{'='*60}")
             self.positive_intent = PositiveIntentMatrix(self.num_nodes)
@@ -139,12 +158,50 @@ class MaxMinACO:
             min_nodes_to_add = self.compute_num_nodes_to_add()
             threshold = 0.95
 
-            current_opt_nodes = [self.required_nodes[i] for i in self.best_tour]
+            # Map node_id → modifier
+            node_modifier_map = {n["node_id"]: n["pheromone_modifier"] for n in significant_nodes}
+            print(f"Significant nodes: {len(significant_nodes)} | Mod range: [{min(node_modifier_map.values()):.3f}, {max(node_modifier_map.values()):.3f}]")
+
+            # Assign values along all shortest paths
+            for i in range(self.num_nodes):
+                for j in range(self.num_nodes):
+                    if i == j:
+                        continue
+                    u, v = self.required_nodes[i], self.required_nodes[j]
+                    if (u, v) in self.shortest_paths:
+                        path = self.shortest_paths[(u, v)]
+                        # Use only significant nodes in path
+                        mods = [node_modifier_map[n] for n in path if n in node_modifier_map]
+                        # Map the mean modifier to a positive value
+                        if mods:
+                            avg_mod = np.mean(mods)
+                            self.positive_intent.matrix[i][j] = self.map_modifier_to_positive_value(avg_mod)
+                        else:
+                            self.positive_intent.matrix[i][j] = 1e-6
+
+                        current_opt_nodes = [self.required_nodes[i] for i in self.best_tour]
             current_opt_path = []
+            full_path = []
             for k in range(len(current_opt_nodes)):
                 u = current_opt_nodes[k]
                 v = current_opt_nodes[(k+1) % len(current_opt_nodes)]
-                sp = nx.shortest_path(self.completeGraph, u, v)
+                # prefer cached shortest_paths updated by ACO
+                sp = None
+                if (u, v) in self.shortest_paths and self.shortest_paths[(u, v)]:
+                    sp = self.shortest_paths[(u, v)]
+                else:
+                    # fall back to running shortest_path on the filtered graph if exists,
+                    # otherwise the original G (but don't use original G if aco created a filtered graph)
+                    graph_for_query = getattr(self, 'completeGraph_filtered', G)
+                    try:
+                        sp = nx.shortest_path(graph_for_query, u, v, weight='weight')
+                    except nx.NetworkXNoPath:
+                        sp = []
+                if not sp:
+                    print(f"Warning: No path between {u} and {v} after exclusion")
+                    full_path = []
+                    break
+                full_path.extend(sp[:-1])
                 current_opt_path.extend(sp[:-1])
             current_opt_path.append(self.start_node)
 
@@ -157,13 +214,13 @@ class MaxMinACO:
             ]
 
             # nodes in current optimal path
-            stage1_modifiers = {
-                n["node_id"]: self.map_modifier_to_positive_value(n["pheromone_modifier"])
-                for n in subset
-            }
-            print("Stage 1 Modifiers:")
-            for node_id, modifier in stage1_modifiers.items():
-                print(f"  Node {node_id}: {modifier:.3f} | Metadata: {sig_map[node_id]['metadata']}")
+            # stage1_modifiers = {
+            #     n["node_id"]: self.map_modifier_to_positive_value(n["pheromone_modifier"])
+            #     for n in subset
+            # }
+            # print("Stage 1 Modifiers:")
+            # for node_id, modifier in stage1_modifiers.items():
+                # print(f"  Node {node_id}: {modifier:.3f} | Metadata: {sig_map[node_id]['metadata']}")
 
             # nodes in current shortest paths
             stage2_modifiers = {
@@ -174,21 +231,90 @@ class MaxMinACO:
             for node_id, modifier in stage2_modifiers.items():
                 if modifier >= threshold:
                     nodes_added += 1
-                    print(f"Node considered: {node_id}")
-                    print(f"Metadata: {sig_map[node_id]['metadata']}")
-                    print(f"Modifier: {modifier:.3f}")
+                    if not hasattr(self, 'added_nodes_set'):
+                        self.added_nodes_set = set()
+                    self.added_nodes_set.add(node_id)
+                    # print(f"Node considered: {node_id}")
+                    # print(f"Metadata: {sig_map[node_id]['metadata']}")
+                    # print(f"Modifier: {modifier:.3f}")
                     
                 if nodes_added >= min_nodes_to_add:
                     # TODO: Rethink if this is too lenient
-                    print("Enough nodes already present in current shortest paths.")
-                    break
+                    print("Enough nodes already present in current shortest paths: " + str(nodes_added))
+                    # Fill matrix with neutral intent if needed
+                    if hasattr(self, 'positive_intent') and self.positive_intent is not None:
+                        self.positive_intent.matrix.fill(1e-6)  # or whatever your neutral value is
+                    return
                 
-            #TODO: now create queue and start adding nodes until min_nodes_to_add is reached
             #Sorted by 1) cost in order closest to current optimal solution paths
             #          2) cost in order of closest to ANY shortest path part of the shortest paths list
+            if nodes_added < min_nodes_to_add:
+                num_additional = min_nodes_to_add - nodes_added
+                print(f"\nNeed {num_additional} more nodes — building filtered candidate set...")
 
+                filtered_candidates = inclusion_filter(self, current_opt_path)
+
+                if not filtered_candidates:
+                    print("No candidates passed the distance thresholds. Consider adjusting thresholds.")
+                else:
+                    # Step 2: Build temp_node_info only for these filtered candidates
+                    temp_nodes_set = {nid for nid, _, _ in filtered_candidates}
+                    temp_subgraph = self.completeGraph.subgraph(temp_nodes_set).copy()
+                    temp_node_info = extract_node_info(temp_subgraph)
+
+                    if not temp_node_info:
+                        print("[Warning] No node metadata available for filtered candidates — skipping inference.")
+                    else:
+                        # Step 3: Run NLP inference on these nearby-but-not-shortest-path nodes
+                        _, conf_sub, sig_nodes_sub = process_instruction(self.instruction, temp_node_info)
+                        print(f"Inference returned {len(sig_nodes_sub)} significant nodes in filtered set (confidence: {conf_sub:.3f})")
+
+                        if sig_nodes_sub:
+                            sig_nodes_sub_sorted = sorted(sig_nodes_sub, key=lambda x: x.get("pheromone_modifier", 0.0), reverse=True)
+                            dist_map_opt = {nid: d for nid, d, _ in filtered_candidates}
+                            dist_map_sp = {nid: d for nid, _, d in filtered_candidates}
+
+                            print("\nInferred Significant Candidates (post-filtering):")
+                            print(f"{'Node ID':<12} {'Modifier':<10} {'d_opt':<10} {'d_sp':<10} {'Metadata'}")
+                            print("-" * 80)
+                            for nd in sig_nodes_sub_sorted[:15]:
+                                nid = nd["node_id"]
+                                mod = nd.get("pheromone_modifier", 0.0)
+                                d1 = dist_map_opt.get(nid, float("inf"))
+                                d2 = dist_map_sp.get(nid, float("inf"))
+                                meta = temp_node_info.get(nid, {}).get("metadata", {})
+                                print(f"{nid:<12} {mod:<10.3f} {d1:<10.2f} {d2:<10.2f} {meta}")
+
+                            self.filtered_inferred_candidates = sig_nodes_sub_sorted
+                            top_inferred = self.filtered_inferred_candidates[:num_additional]
+                            included_ids = [node["node_id"] for node in top_inferred]
+                            # Add included_ids to the added_nodes_set
+                            if not hasattr(self, 'added_nodes_set'):
+                                self.added_nodes_set = set()
+                            self.added_nodes_set.update(included_ids)
+                            self.cost_matrix, self.shortest_paths = inclusion_closure_update(
+                                self.completeGraph,
+                                self.required_nodes,
+                                self.cost_matrix,
+                                self.shortest_paths,
+                                included_ids,
+                                self.index_map
+                            )
+                        else:
+                            print("No significant nodes returned by inference on filtered set.")
+                                    
             print(f"Significant nodes: {len(significant_nodes)} | Mod range: [{min(stage2_modifiers.values()):.3f}, {max(stage2_modifiers.values()):.3f}]")
+        # Resynchronize best_length and tour after exclusion closure
+        if self.best_tour is not None:
+            new_cost = sum(
+                self.cost_matrix[self.best_tour[i]][self.best_tour[i+1]]
+                for i in range(len(self.best_tour)-1)
+            ) + self.cost_matrix[self.best_tour[-1]][self.best_tour[0]]
 
+            if abs(new_cost - self.best_length) > 1e-6:
+                print(f"[Sync] Adjusting best_length: {self.best_length:.3f} → {new_cost:.3f}")
+                self.best_length = new_cost
+        print(f"Current ACO Best Length: {self.best_length:.3f}")
         print(f"\nInstruction Summary:\n  Intent: {intent_type}\n  Confidence: {confidence:.3f}")
 
         # sorted_nodes = sorted(significant_nodes, key=lambda x: x["similarity"], reverse=True)[:100]
@@ -210,13 +336,17 @@ class MaxMinACO:
                 # construct tour
                 while len(ant.tour) < self.num_nodes:
                     if self.negative_intent is not None:
-                        modifier = self.confidence * 4 - 1.5 
-                        if modifier < 1: modifier = 1
+                        modifier = self.confidence
                         if not ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta, self.negative_intent.matrix, upsilon=modifier):
                             break  # ant got stuck
-                    else:
-                        if not ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta):
-                            break  # ant got stuck
+                    else: 
+                        if self.positive_intent is not None:
+                            modifier = self.confidence
+                            if not ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta, self.positive_intent.matrix, upsilon=modifier):
+                                break  # ant got stuck
+                        else:
+                            if not ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta):
+                                break  # ant got stuck
                 
                 # Only calculate length if tour is complete
                 if len(ant.tour) == self.num_nodes:
@@ -231,6 +361,10 @@ class MaxMinACO:
                         if ant.tour_length < self.best_iter_length:
                             self.best_iter_tour = ant.tour.copy()
                             self.best_iter_length = ant.tour_length
+                            if self.positive_intent is not None or self.negative_intent is not None:
+                                if ant.tour_length < self.post_instruction_best_length:
+                                    self.post_instruction_best_tour = ant.tour.copy()
+                                    self.post_instruction_best_length = ant.tour_length
                 else:
                     ant.tour_length = float('inf')
 
