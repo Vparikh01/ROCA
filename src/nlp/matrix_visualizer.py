@@ -2,12 +2,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 def visualize_intent_matrix(matrix, num_nodes, intent_type, save_path=None):
-    """
-    Visualize as sorted edge list - works for both negative and positive intent.
-    
-    Negative: lower values → more avoided, higher → neutral.
-    Positive: higher values → more preferred, lower → neutral.
-    """
     if matrix is None:
         print("No intent matrix to visualize")
         return

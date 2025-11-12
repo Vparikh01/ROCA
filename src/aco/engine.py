@@ -14,19 +14,22 @@ from src.aco.astar import inclusion_filter
 cfg = load_config()
 
 class MaxMinACO:
-    def __init__(self, cost_matrix, start_node, reducedGraph, completeGraph, shortest_paths, required_nodes, index_map):
+    def __init__(self, cost_matrix, start_node, reducedGraph, completeGraph, shortest_paths, required_nodes, index_map, seed=None):
         self.cost_matrix = cost_matrix
         self.start_node = start_node
         self.num_nodes = len(cost_matrix)
         self.num_ants = min(cfg["num_ants"], self.num_nodes)
         self.alpha = cfg["alpha"]
         self.beta = cfg["beta"]
+        self.seed = seed if seed is not None else cfg.get("seed") or 0
+        self.total_iterations = 0
+
         
         positive_costs = cost_matrix[cost_matrix > 0]
         expected_length = max(np.mean(positive_costs) * self.num_nodes, 1e-6)
         self.pheromones = PheromoneMatrix(self.num_nodes, cfg["rho"], expected_length)
-        self.negative_intent = None  # to be set via instruction
-        self.positive_intent = None  # to be set via instruction
+        self.negative_intent = None  # set via instruction
+        self.positive_intent = None  # set via instruction
         self.shortest_paths = shortest_paths
         unique_nodes = set().union(*self.shortest_paths.values())
         self.completeGraph = completeGraph
@@ -52,11 +55,11 @@ class MaxMinACO:
                 start_node=self.start_node,
                 num_nodes=self.num_nodes,
                 graph=reducedGraph,
-                seed=(cfg.get("seed") or 0) + i  # per-ant reproducible RNG
+                seed= self.seed + i  # per-ant reproducible RNG
             )
             for i in range(self.num_ants)
         ]
-        np.random.seed(cfg.get("seed") or 0)
+        np.random.seed(self.seed)
 
     def apply_instruction(self, instruction):
 
@@ -327,83 +330,111 @@ class MaxMinACO:
 
 
     def run(self, iterations=100, n=0):
-        for _ in range(iterations):
+        for iteration in range(iterations):
+            self.total_iterations += 1  # increment global counter
             self.best_iter_tour = None
             self.best_iter_length = float('inf')
-            
+
+            # Reset all ants at the start of each iteration
             for ant in self.ants:
                 ant.reset()
-                # construct tour
-                while len(ant.tour) < self.num_nodes:
+
+            # Track whether ants have completed their tour
+            unfinished_ants = np.array([True] * self.num_ants)
+
+            # Construct tours step by step
+            for step in range(self.num_nodes - 1):
+                # Build a list of active ants for this step
+                active_ants = [ant for ant, active in zip(self.ants, unfinished_ants) if active]
+
+                if not active_ants:
+                    break  # all ants finished early
+
+                for ant in active_ants:
+                    # Choose next node vectorized internally
                     if self.negative_intent is not None:
                         modifier = self.confidence
-                        if not ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta, self.negative_intent.matrix, upsilon=modifier):
-                            break  # ant got stuck
-                    else: 
-                        if self.positive_intent is not None:
-                            modifier = self.confidence
-                            if not ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta, self.positive_intent.matrix, upsilon=modifier):
-                                break  # ant got stuck
-                        else:
-                            if not ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta):
-                                break  # ant got stuck
-                
-                # Only calculate length if tour is complete
-                if len(ant.tour) == self.num_nodes:
-                    ant.tour_length = self.calculate_tour_length(ant.tour)
-                    
-                    # Skip if tour uses impossible paths
-                    if not np.isinf(ant.tour_length):
-                        # update best
-                        if ant.tour_length < self.best_length:
-                            self.best_tour = ant.tour.copy()
-                            self.best_length = ant.tour_length
-                        if ant.tour_length < self.best_iter_length:
-                            self.best_iter_tour = ant.tour.copy()
-                            self.best_iter_length = ant.tour_length
-                            if self.positive_intent is not None or self.negative_intent is not None:
-                                if ant.tour_length < self.post_instruction_best_length:
-                                    self.post_instruction_best_tour = ant.tour.copy()
-                                    self.post_instruction_best_length = ant.tour_length
-                else:
-                    ant.tour_length = float('inf')
+                        ant.choose_next_node(
+                            self.pheromones.matrix,
+                            self.heuristic,
+                            self.alpha,
+                            self.beta,
+                            self.negative_intent.matrix,
+                            upsilon=modifier
+                        )
+                    elif self.positive_intent is not None:
+                        modifier = self.confidence
+                        ant.choose_next_node(
+                            self.pheromones.matrix,
+                            self.heuristic,
+                            self.alpha,
+                            self.beta,
+                            self.positive_intent.matrix,
+                            upsilon=modifier
+                        )
+                    else:
+                        ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta)
 
+                # Update unfinished_ants mask
+                for idx, ant in enumerate(self.ants):
+                    if len(ant.tour) >= self.num_nodes:
+                        unfinished_ants[idx] = False
+
+            # Calculate tour lengths in a vectorized way
+            tour_lengths = []
+            for ant in self.ants:
+                ant.tour_length = self.calculate_tour_length(ant.tour)
+                tour_lengths.append(ant.tour_length)
+            tour_lengths = np.array(tour_lengths)
+
+            # Update iteration-best and global-best
+            finite_mask = np.isfinite(tour_lengths)
+            if finite_mask.any():
+                best_idx = np.argmin(tour_lengths[finite_mask])
+                best_ant = np.array(self.ants)[finite_mask][best_idx]
+
+                self.best_iter_tour = best_ant.tour.copy()
+                self.best_iter_length = best_ant.tour_length
+
+                if self.best_iter_length < self.best_length:
+                    self.best_length = self.best_iter_length
+                    self.best_tour = self.best_iter_tour.copy()
+
+                if self.positive_intent is not None or self.negative_intent is not None:
+                    post_instr_best_idx = np.argmin(tour_lengths[finite_mask])
+                    post_instr_best_ant = np.array(self.ants)[finite_mask][post_instr_best_idx]
+                    self.post_instruction_best_tour = post_instr_best_ant.tour.copy()
+                    self.post_instruction_best_length = post_instr_best_ant.tour_length
+
+            # Evaporate pheromones
             self.pheromones.evaporate()
 
-            # Only deposit if we have valid tours
+            # Deposit pheromones (iteration-best or global-best)
             if self.best_iter_tour is not None and self.best_tour is not None:
-                if np.random.rand() < 0.25:  # 25% iteration-best
+                if np.random.rand() < 0.25:  # iteration-best
                     self.pheromones.deposit(self.best_iter_tour, self.best_iter_length)
-                else:  # 75% global-best
+                else:  # global-best
                     self.pheromones.deposit(self.best_tour, self.best_length)
             elif self.best_iter_tour is not None:
-                # Only iteration-best is valid
                 self.pheromones.deposit(self.best_iter_tour, self.best_iter_length)
             elif self.best_tour is not None:
-                # Only global-best is valid (shouldn't happen but just in case)
                 self.pheromones.deposit(self.best_tour, self.best_length)
             else:
-                # No valid tours at all
-                print(f"Warning: No valid tours found in iteration {n+1}")
-            
-            print(f"Iteration {n+1}: Best length {self.best_length}")
+                print(f"Warning: No valid tours found in iteration {iteration}")
+
+            print(f"Iteration {self.total_iterations}: Best length {self.best_length:.3f}")
 
     def calculate_tour_length(self, tour):
         if tour is None or len(tour) < self.num_nodes:
             return float('inf')
         
-        length = 0
-        for i in range(len(tour)-1):
-            cost = self.cost_matrix[tour[i]][tour[i+1]]
-            if np.isinf(cost):
-                return float('inf')
-            length += cost
-        
-        final_cost = self.cost_matrix[tour[-1]][tour[0]]
-        if np.isinf(final_cost):
+        tour_np = np.array(tour, dtype=int)
+        edges = self.cost_matrix[tour_np[:-1], tour_np[1:]]
+        if np.isinf(edges).any():
             return float('inf')
         
-        return length + final_cost
+        final_edge = self.cost_matrix[tour_np[-1], tour_np[0]]
+        return float(np.sum(edges) + final_edge) if not np.isinf(final_edge) else float('inf')
     
     def compute_num_nodes_to_add(self):
         """Heuristic: how many nodes to add. Conservative growth with problem size."""

@@ -1,8 +1,8 @@
 alpha: 1.1
-beta: 2.4
-rho: 0.1 # evaporation rate
+beta: 5.0
+rho: 0.25 # evaporation rate
 q: 100 # pheromone deposit scaling
-num_ants: 50
+num_ants: 10
 iterations: 500
 seed: 42
 tau:

@@ -8,10 +8,11 @@ from src.aco.visualizer import draw_aco_graph
 from src.aco.engine import MaxMinACO
 from src.aco.astar import build_metric_closure
 from src.nlp.matrix_visualizer import visualize_intent_matrix
+from src.aco.pheromone_heatmap import pheromone_heatmap, pheromone_composite, pheromone_blend
 
 # ------------------ Paths ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EUROPE_AIRPORTS_PKL = os.path.join(BASE_DIR, "..", "datasets", "europe_airports_graph.pkl")
+EUROPEAN_AIRPORTS_PKL = os.path.join(BASE_DIR, "..", "datasets", "europe_airports_graph.pkl")
 
 def load_graph(pkl_path):
     with open(pkl_path, "rb") as f:
@@ -21,7 +22,7 @@ def load_graph(pkl_path):
     return G
 
 # ------------------ Load and preprocess graph ------------------
-G = load_graph(EUROPE_AIRPORTS_PKL)
+G = load_graph(EUROPEAN_AIRPORTS_PKL)
 
 # Filter out very low-degree nodes
 node_degrees = dict(G.degree())
@@ -72,6 +73,7 @@ edge_weights = {
 aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed, completeGraph=G, shortest_paths=shortest_paths, required_nodes=required_nodes, index_map=index_map)
 NUM_ITERATIONS = 200
 iteration_paths = []
+pheromone_matrices = []
 
 # Helper function to get the correct graph for path computation
 def get_active_graph():
@@ -80,6 +82,9 @@ def get_active_graph():
 
 for n in range(NUM_ITERATIONS):
     aco.run(iterations=1, n=n)
+
+    pheromone_snapshot = aco.pheromones.matrix.copy()
+    pheromone_matrices.append(pheromone_snapshot)
     
     # Check if we have a valid tour before processing
     if aco.best_iter_tour is not None:
@@ -126,7 +131,7 @@ for n in range(NUM_ITERATIONS):
     
     if n == 50:
         NUM_ITERATIONS += n
-        aco.apply_instruction("avoid eastern europe")
+        aco.apply_instruction("exclude southern europe")
         # Update cost_matrix and G_indexed to reflect exclusions
         cost_matrix = aco.cost_matrix  # Get updated cost matrix
         
@@ -224,7 +229,7 @@ draw_aco_graph(
     edge_weights=edge_weights,
     optimal_path=optimal_full_path,
     added_nodes=list(aco.added_nodes_set) if hasattr(aco, 'added_nodes_set') else [],
-    removed_nodes=list(aco.safe) if hasattr(aco, 'safe') else []
+    removed_nodes=list(aco.safe) if hasattr(aco, 'safe') else [],
 )
 
 if aco.negative_intent is not None:
@@ -239,3 +244,16 @@ if aco.positive_intent is not None:
         num_nodes,
         aco.intent_type
     )
+# pheromone_heatmap(
+#     pheromone_matrices,
+#     # save_path=os.path.join(BASE_DIR, "pheromone_evolution.gif"),
+#     interval=120,
+#     cmap='coolwarm'
+# )
+
+# pheromone_composite(pheromone_matrices)
+
+# pheromone_blend(
+#     pheromone_matrices,
+#     iterations=(0, 50,100),
+# )

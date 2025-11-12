@@ -8,11 +8,11 @@ from src.aco.visualizer import draw_aco_graph
 from src.aco.engine import MaxMinACO
 from src.aco.astar import build_metric_closure
 from src.nlp.matrix_visualizer import visualize_intent_matrix
-from src.aco.pheromone_heatmap import pheromone_heatmap, pheromone_composite, pheromone_blend, pheromone_trend
+from src.aco.pheromone_heatmap import pheromone_heatmap, pheromone_composite, pheromone_blend
 
 # ------------------ Paths ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PALO_ALTO_PKL = os.path.join(BASE_DIR, "..", "datasets", "sanjose_graph.pkl")
+PALO_ALTO_PKL = os.path.join(BASE_DIR, "..", "datasets", "sf_graph.pkl")
 
 def load_graph(pkl_path):
     with open(pkl_path, "rb") as f:

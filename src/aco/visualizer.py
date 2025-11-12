@@ -6,11 +6,6 @@ def draw_aco_graph(
     start=None, end=None, required_nodes=None, edge_weights=None,
     optimal_path=None, added_nodes=None, removed_nodes=None
 ):
-    """
-    Visualizes ACO iterative paths on a graph using Plotly.
-    Highlights required nodes, shows reduced graph edge costs,
-    final best ACO path, optimal path, and added/removed nodes.
-    """
     # ---------- Base edges (full graph) ----------
     edge_x, edge_y = [], []
     for u, v in G.edges():

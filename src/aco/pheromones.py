@@ -15,15 +15,12 @@ class PheromoneMatrix:
         np.clip(self.matrix, self.tau_min, self.tau_max, out=self.matrix)
 
     def deposit(self, tour, tour_length):
-        """
-        Deposit pheromone along tour: only global-best ant in MMAS
-        Δτ = 1 / tour_length
-        """
         delta = 1 / tour_length
-        for i in range(len(tour) - 1):
-            a, b = tour[i], tour[i+1]
-            self.matrix[a][b] += delta
-            self.matrix[b][a] += delta  # symmetric
+        tour_arr = np.array(tour, dtype=int)
+        edges_a = tour_arr[:-1]
+        edges_b = tour_arr[1:]
+        self.matrix[edges_a, edges_b] += delta
+        self.matrix[edges_b, edges_a] += delta  # symmetric
         np.clip(self.matrix, self.tau_min, self.tau_max, out=self.matrix)
     def reset(self):
         self.matrix.fill(self.tau_max)
