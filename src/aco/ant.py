@@ -1,5 +1,9 @@
 import numpy as np
 import networkx as nx
+from src.aco.config import load_config
+
+cfg = load_config()
+
 
 class Ant:
     def __init__(self, start_node, num_nodes, graph: nx.Graph, seed=None):
@@ -10,6 +14,8 @@ class Ant:
         self.tour_length = 0
         self.graph = graph
         self.num_nodes = num_nodes
+        self.alpha = cfg["alpha"]
+        self.beta = cfg["beta"]
         self.rng = np.random.default_rng(seed)
 
         # Precompute neighbors as NumPy arrays
@@ -24,7 +30,7 @@ class Ant:
         self.visited = set([self.start_node])
         self.tour_length = 0
 
-    def choose_next_node(self, pheromone_matrix, heuristic_matrix, alpha, beta, intent_matrix=None, upsilon=None):
+    def choose_next_node(self, pheromone_matrix, heuristic_matrix, intent_matrix=None, upsilon=None):
         # Use precomputed neighbors
         all_neighbors = self.neighbor_indices[self.current_node]
 
@@ -41,9 +47,9 @@ class Ant:
 
         if intent_matrix is not None and upsilon is not None:
             pi = intent_matrix[self.current_node, neighbors]
-            probs = (tau ** alpha) * (eta ** beta) * (pi ** upsilon)
+            probs = (tau ** self.alpha) * (eta ** self.beta) * (pi ** upsilon)
         else:
-            probs = (tau ** alpha) * (eta ** beta)
+            probs = (tau ** self.alpha) * (eta ** self.beta)
 
         # Normalize safely
         total = probs.sum()
