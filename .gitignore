@@ -210,7 +210,6 @@ __marimo__/
 # ---- Project Specific ----
 
 # Generated graphs / images
-*.png
 *.jpg
 *.svg
 
