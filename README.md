@@ -1,7 +1,6 @@
-# ROCA
 <div align="center">
-  
-**Hybrid ACO + NLP + RL routing engine with visualization**
+
+# ROCA: **ACO + NLP + RL routing engine with visualization**
 
 [Architecture](#architecture) • [Quick Start](#quick-start) • [Demo](#demo)
 
