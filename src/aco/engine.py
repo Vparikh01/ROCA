@@ -15,15 +15,27 @@ cfg = load_config()
 
 class MaxMinACO:
     def __init__(self, cost_matrix, start_node, reducedGraph, completeGraph, shortest_paths, required_nodes, index_map, seed=None):
+        self.ITERATION_BEST_RATIO = 0.325
         self.cost_matrix = cost_matrix
         self.start_node = start_node
         self.num_nodes = len(cost_matrix)
         self.num_ants = min(cfg["num_ants"], self.num_nodes)
         self.alpha = cfg["alpha"]
         self.beta = cfg["beta"]
-        self.seed = seed if seed is not None else cfg.get("seed") or 0
+        self.seed = seed if seed is not None else cfg["seed"] or 0
         self.total_iterations = 0
 
+        # Macro-evolution / population settings (config override)
+        self.macro_iter_size = cfg.get("macro_iter_size", 20)
+        # TODO: tune later:
+        self._evo_defaults = {
+            "selection_ratio": cfg["evo_selection_ratio"],
+            "elite_frac": cfg["evo_elite_frac"],
+            "mutation_sigma": cfg["evo_mutation_sigma"],
+            "reinit_frac": cfg["evo_reinit_frac"],
+            "diversity_threshold": cfg["evo_diversity_threshold"],
+        }
+        self.best_length_history = []  # Track best length over iterations
         
         positive_costs = cost_matrix[cost_matrix > 0]
         expected_length = max(np.mean(positive_costs) * self.num_nodes, 1e-6)
@@ -50,15 +62,26 @@ class MaxMinACO:
         self.best_length = float('inf')
         self.post_instruction_best_tour = None
         self.post_instruction_best_length = float('inf')
+        
         self.ants = [
             Ant(
                 start_node=self.start_node,
                 num_nodes=self.num_nodes,
                 graph=reducedGraph,
-                seed= self.seed + i  # per-ant reproducible RNG
+                seed=self.seed + i
             )
             for i in range(self.num_ants)
         ]
+
+        # Initialize population with diversity from the start
+        for i, ant in enumerate(self.ants):
+            if i == 0:
+                # Keep first ant at baseline config values
+                continue
+            # Give other ants diverse starting parameters
+            a, b = self._sample_random_params()
+            ant.alpha = float(a)
+            ant.beta = float(b)
         np.random.seed(self.seed)
 
     def apply_instruction(self, instruction):
@@ -328,6 +351,125 @@ class MaxMinACO:
         #     print("Metadata:", node["metadata"])
         #     print("---")
 
+     # ---------- Population evolution helpers ----------
+    def _ant_fitness(self, ant):
+        # lower tour_length -> higher fitness; protect against inf or non-positive
+        if not np.isfinite(ant.tour_length) or ant.tour_length <= 0:
+            return 0.0
+        return 1.0 / ant.tour_length
+
+    def _lognormal(self, mean, sigma):
+        # wrapper — uses numpy RNG seeded at class level (np.random.seed called in __init__)
+        return np.random.lognormal(mean=mean, sigma=sigma)
+
+    def _sample_random_params(self):
+        """Sample new random alpha,beta near base cfg values (lognormal around base)."""
+        base_a = cfg.get("alpha", 1.0)
+        base_b = cfg.get("beta", 5.0)
+        a = base_a * self._lognormal(0.0, 0.25)  # broader reinit
+        b = base_b * self._lognormal(0.0, 0.25)
+        return (a, b)
+
+    def _reinit_ant_params(self, ant):
+        a, b = self._sample_random_params()
+        ant.alpha = float(a)
+        ant.beta = float(b)
+
+    def evolve_population(self,
+                          selection_ratio=None,
+                          elite_frac=None,
+                          mutation_sigma=None,
+                          reinit_frac=None,
+                          diversity_threshold=None):
+        """
+        Evolve per-ant parameter vectors (alpha, beta).
+        If any arg is None, use sensible defaults from self._evo_defaults.
+        """
+        # resolve defaults
+        selection_ratio = selection_ratio if selection_ratio is not None else self._evo_defaults["selection_ratio"]
+        elite_frac = elite_frac if elite_frac is not None else self._evo_defaults["elite_frac"]
+        mutation_sigma = mutation_sigma if mutation_sigma is not None else self._evo_defaults["mutation_sigma"]
+        reinit_frac = reinit_frac if reinit_frac is not None else self._evo_defaults["reinit_frac"]
+        diversity_threshold = diversity_threshold if diversity_threshold is not None else self._evo_defaults["diversity_threshold"]
+
+        num = len(self.ants)
+        if num == 0:
+            return
+
+        # collect fitnesses from last iteration (assumes ant.tour_length set)
+        fitnesses = np.array([self._ant_fitness(a) for a in self.ants])
+        if fitnesses.sum() <= 0:
+            # nothing to learn from; randomize a small fraction
+            for i in np.random.choice(range(num), max(1, int(np.ceil(num * reinit_frac))), replace=False):
+                self._reinit_ant_params(self.ants[i])
+            return
+
+        # ranking by tour_length (lower is better)
+        ranked_idx = np.argsort([a.tour_length if np.isfinite(a.tour_length) else float('inf') for a in self.ants])
+        n_elite = max(1, int(np.floor(elite_frac * num)))
+
+        # keep elites (copy their params into next generation)
+        elites = [self.ants[i] for i in ranked_idx[:n_elite]]
+
+        # selection pool (roulette by fitness)
+        parent_probs = fitnesses / fitnesses.sum()
+        n_parents = max(1, int(np.ceil(selection_ratio * num)))
+        parent_indices = np.random.choice(range(num), size=n_parents, p=parent_probs, replace=True)
+
+        # build new parameter list
+        new_params = []
+
+        # keep elites first (preserve exactly)
+        for e in elites:
+            new_params.append((e.alpha, e.beta))
+
+        # generate children by sampling parents + mutation
+        for _ in range(num - len(new_params)):
+            parent_idx = np.random.choice(parent_indices)
+            parent = self.ants[parent_idx]
+            # mutate parent's params via lognormal multiplier
+            child_alpha = parent.alpha * self._lognormal(0.0, mutation_sigma)
+            child_beta = parent.beta * self._lognormal(0.0, mutation_sigma)
+            new_params.append((child_alpha, child_beta))
+            
+
+        # reinit a small fraction to keep exploration
+        n_reinit = max(1, int(np.floor(reinit_frac * num)))
+
+        # ONLY select from non-elite positions
+        reinit_indices = np.random.choice(
+            range(n_elite, len(new_params)),  # Start after elites
+            min(n_reinit, len(new_params) - n_elite),  # Don't exceed available slots
+            replace=False
+        )
+
+        for ri in reinit_indices:
+            new_params[ri] = self._sample_random_params()
+        
+        # apply new params to ants (in-place)
+        for ant, (a_p, b_p) in zip(self.ants, new_params):
+            ant.alpha = float(a_p)
+            ant.beta = float(b_p)
+
+        # Diversity check: if variance too small, force reinit for a chunk
+        alphas = np.array([ant.alpha for ant in self.ants])
+        betas = np.array([ant.beta for ant in self.ants])
+        if np.var(alphas) < diversity_threshold and np.var(betas) < diversity_threshold:
+            # blow up diversity by reinitializing a larger fraction
+            n_force = max(1, int(np.ceil(0.25 * num)))
+            
+            # Protect elites from forced reinitialization
+            idxs = np.random.choice(
+                range(n_elite, num),  # Only non-elite ants
+                min(n_force, num - n_elite),
+                replace=False
+            )
+            
+            for i in idxs:
+                self._reinit_ant_params(self.ants[i])
+
+    # ---------- end population helpers ----------
+
 
     def run(self, iterations=100, n=0):
         for iteration in range(iterations):
@@ -357,8 +499,6 @@ class MaxMinACO:
                         ant.choose_next_node(
                             self.pheromones.matrix,
                             self.heuristic,
-                            self.alpha,
-                            self.beta,
                             self.negative_intent.matrix,
                             upsilon=modifier
                         )
@@ -367,13 +507,11 @@ class MaxMinACO:
                         ant.choose_next_node(
                             self.pheromones.matrix,
                             self.heuristic,
-                            self.alpha,
-                            self.beta,
                             self.positive_intent.matrix,
                             upsilon=modifier
                         )
                     else:
-                        ant.choose_next_node(self.pheromones.matrix, self.heuristic, self.alpha, self.beta)
+                        ant.choose_next_node(self.pheromones.matrix, self.heuristic)
 
                 # Update unfinished_ants mask
                 for idx, ant in enumerate(self.ants):
@@ -411,7 +549,7 @@ class MaxMinACO:
 
             # Deposit pheromones (iteration-best or global-best)
             if self.best_iter_tour is not None and self.best_tour is not None:
-                if np.random.rand() < 0.25:  # iteration-best
+                if np.random.rand() < self.ITERATION_BEST_RATIO:  # iteration-best
                     self.pheromones.deposit(self.best_iter_tour, self.best_iter_length)
                 else:  # global-best
                     self.pheromones.deposit(self.best_tour, self.best_length)
@@ -421,9 +559,19 @@ class MaxMinACO:
                 self.pheromones.deposit(self.best_tour, self.best_length)
             else:
                 print(f"Warning: No valid tours found in iteration {iteration}")
+            
+            # --- macro-evolution trigger ---
+            if self.total_iterations % self.macro_iter_size == 0:
+                self.evolve_population(
+                    selection_ratio=self._evo_defaults["selection_ratio"],
+                    elite_frac=self._evo_defaults["elite_frac"],
+                    mutation_sigma=self._evo_defaults["mutation_sigma"],
+                    reinit_frac=self._evo_defaults["reinit_frac"],
+                    diversity_threshold=self._evo_defaults["diversity_threshold"]
+                )
 
             print(f"Iteration {self.total_iterations}: Best length {self.best_length:.3f}")
-
+            self.best_length_history.append(self.best_length)
     def calculate_tour_length(self, tour):
         if tour is None or len(tour) < self.num_nodes:
             return float('inf')
