@@ -226,9 +226,5 @@ def visualize(all_mean_costs, all_tconv, proportion_pass):
 
     fig.show()
 
-
-# ============================================================
-# ENTRY
-# ============================================================
 if __name__ == "__main__":
     run_benchmark()
