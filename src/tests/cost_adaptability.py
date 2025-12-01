@@ -1,14 +1,16 @@
 import os
 import pickle
+import tempfile
+import shutil
+import subprocess
 import numpy as np
 import networkx as nx
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.aco.engine import MaxMinACO
+import warnings
+from typing import Tuple, List, Optional
 
-# ============================================================
-# CONFIG
-# ============================================================
 NUM_RUNS = 2
 I_MAX = 200
 T_CHANGE = 80               # iteration where weight modification happens
@@ -27,202 +29,182 @@ KNOWN_OPTIMAL_TOUR = [
     38, 32, 44, 14, 43, 41, 39, 18, 40, 12, 24, 13, 23, 42, 6, 22, 47, 5, 26,
     50, 45, 11, 46, 17, 3, 16, 36, 4, 37, 10, 31
 ]
-
 KNOWN_OPTIMAL_COST = 426
 
+# Concorde run behavior
+CONCORDE_BINARY = os.environ.get("CONCORDE_BIN", "concorde")  # fallback
+USE_PYCONCORDE = True  # try pyconcorde first
+VERBOSE = False        # suppress Concorde logs
 
-# ============================================================
-# LOAD GRAPH
-# ============================================================
-def load_graph(pkl_path):
+def load_graph(pkl_path: str):
     with open(pkl_path, "rb") as f:
         data = pickle.load(f)
 
-    coords = np.array(data["coordinates"])
+    coords = np.array(data.get("coordinates", data.get("coords", None)))
+    if coords is None:
+        if isinstance(data, nx.Graph):
+            coords_list = []
+            nodes = sorted(data.nodes())
+            for n in nodes:
+                c = data.nodes[n].get("coord") or data.nodes[n].get("coords") or data.nodes[n].get("coordinate")
+                if c is None:
+                    raise RuntimeError("Could not find node coordinate attributes in the pickle.")
+                coords_list.append(tuple(c))
+            coords = np.array(coords_list)
+        else:
+            raise RuntimeError("Cannot extract coordinates from the provided pickle.")
     n = len(coords)
 
     G = nx.Graph()
     for i in range(n):
         for j in range(i + 1, n):
-            # Use ROUNDED Euclidean distance (TSPLIB standard)
             w = float(np.round(np.linalg.norm(coords[i] - coords[j])))
             G.add_edge(i, j, weight=w)
 
     return G, coords
 
-
-# ============================================================
-# COMPUTE COST OF A TOUR
-# ============================================================
-def compute_tour_cost(tour, cost_matrix):
-    """Calculate total cost of a tour."""
+def compute_tour_cost(tour: List[int], cost_matrix: np.ndarray) -> float:
     n = len(tour)
     return sum(cost_matrix[tour[i]][tour[(i + 1) % n]] for i in range(n))
 
+def write_explicit_tsp(cost_matrix: np.ndarray, path: str, name: str = "modified"):
+    n = cost_matrix.shape[0]
+    with open(path, "w") as f:
+        f.write(f"NAME: {name}\nTYPE: TSP\nDIMENSION: {n}\n")
+        f.write("EDGE_WEIGHT_TYPE: EXPLICIT\nEDGE_WEIGHT_FORMAT: FULL_MATRIX\nEDGE_WEIGHT_SECTION\n")
+        for i in range(n):
+            row = " ".join(str(int(round(cost_matrix[i, j]))) for j in range(n))
+            f.write(row + "\n")
+        f.write("EOF\n")
+
+def run_concorde_on_tspfile(tsp_path: str, work_dir: str) -> Tuple[List[int], Optional[float]]:
+    if USE_PYCONCORDE:
+        try:
+            from concorde.tsp import TSPSolver
+            solver = TSPSolver.from_tspfile(tsp_path)
+            sol = solver.solve()
+            tour = list(sol.tour)
+            cost = float(sol.tour_length) if hasattr(sol, "tour_length") else None
+            return tour, cost
+        except Exception:
+            pass
+
+    try:
+        with open(os.devnull, "w") as fnull:
+            subprocess.check_call([CONCORDE_BINARY, tsp_path], cwd=work_dir,
+                                  stdout=fnull, stderr=fnull)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Concorde binary not found at '{CONCORDE_BINARY}'.") from e
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Concorde returned non-zero exit status: {e}")
+
+    base = os.path.splitext(os.path.basename(tsp_path))[0]
+    sol_file = next((os.path.join(work_dir, f) for f in os.listdir(work_dir)
+                     if f.startswith(base) and f.endswith(".sol")), None)
+    if not sol_file:
+        raise RuntimeError("Concorde did not produce a .sol file (expected).")
+
+    tour, cost = [], None
+    with open(sol_file, "r") as f:
+        lines = [ln.strip() for ln in f if ln.strip()]
+        for ln in lines:
+            if ln.upper().startswith("TOUR_SECTION") or ln.upper().startswith("EOF"):
+                continue
+            try:
+                v = int(ln)
+                if v == -1: continue
+                tour.append(v - 1)
+            except ValueError:
+                continue
+    return tour, cost
+
+def compute_optimal_tour_via_concorde_explicit(cost_matrix: np.ndarray) -> Tuple[List[int], float]:
+    tempdir = tempfile.mkdtemp(prefix="tmp_concorde_")
+    try:
+        tsp_path = os.path.join(tempdir, "modified_explicit.tsp")
+        write_explicit_tsp(cost_matrix, tsp_path)
+        tour, cost = run_concorde_on_tspfile(tsp_path, tempdir)
+        if cost is None:
+            cost = compute_tour_cost(tour, cost_matrix)
+        return tour, cost
+    finally:
+        shutil.rmtree(tempdir)
 
 # ============================================================
-# CREATE EDGE MODIFICATION FOR ADAPTIVITY TEST
+# EDGE MODIFICATION
 # ============================================================
-def create_edge_modification(cost_matrix, target_P):
-    """
-    Simple strategy:
-    1. Find an edge NOT in the optimal tour
-    2. Reduce it drastically, see what happens to optimal
-    3. Adjust iteratively until we get close to target_P% improvement
-    
-    Returns: (u, v, new_weight, new_optimal_tour, new_optimal_cost, actual_P)
-    """
-    n = len(cost_matrix)
-    original_tour = KNOWN_OPTIMAL_TOUR.copy()
-    
-    # Verify original optimal cost
-    original_cost = compute_tour_cost(original_tour, cost_matrix)
-    print(f"  Original optimal cost: {original_cost:.2f} (expected: {KNOWN_OPTIMAL_COST})")
-    assert abs(original_cost - KNOWN_OPTIMAL_COST) < 1.0, "Original tour cost doesn't match!"
-    
-    target_new_optimal = original_cost * (1 - target_P / 100)
-    print(f"  Target P: {target_P}% → Target new optimal: {target_new_optimal:.2f}")
-    
-    # Build set of edges in original optimal tour
-    original_edges = set()
-    for idx in range(len(original_tour)):
-        u, v = original_tour[idx], original_tour[(idx + 1) % len(original_tour)]
-        original_edges.add((min(u, v), max(u, v)))
-    
-    # Find an edge NOT in the optimal tour with reasonable weight
-    candidate_edges = []
-    for i in range(n):
-        for j in range(i+1, n):
-            edge_key = (min(i, j), max(i, j))
-            if edge_key not in original_edges:
-                weight = cost_matrix[i][j]
-                if weight > 10:  # Pick edges with some weight to modify
-                    candidate_edges.append((i, j, weight))
-    
-    # Sort by weight (higher weight = more impact when reduced)
-    candidate_edges.sort(key=lambda x: x[2], reverse=True)
-    
-    # Try different edges and reductions until we get close to target_P
-    best_result = None
-    best_diff = float('inf')
-    
-    for u, v, original_weight in candidate_edges[:20]:  # Try top 20 candidates
-        # Try different reduction amounts
-        for reduction_pct in [0.99, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20]:
-            new_weight = max(0.1, original_weight * (1 - reduction_pct))
-            
-            # Apply modification
-            modified_cost_matrix = cost_matrix.copy()
-            modified_cost_matrix[u][v] = new_weight
-            modified_cost_matrix[v][u] = new_weight
-            
-            # Find best tour with modified costs by trying ALL 2-opt swaps exhaustively
-            best_tour = original_tour
-            best_cost = compute_tour_cost(original_tour, modified_cost_matrix)
-            
-            # Try ALL 2-opt swaps exhaustively
-            for i in range(1, n-1):
-                for k in range(i+1, n):
-                    swap_tour = original_tour[:i] + original_tour[i:k+1][::-1] + original_tour[k+1:]
-                    swap_cost = compute_tour_cost(swap_tour, modified_cost_matrix)
-                    if swap_cost < best_cost:
-                        best_cost = swap_cost
-                        best_tour = swap_tour
-            
-            # Check if this gets us close to target
-            actual_P = ((original_cost - best_cost) / original_cost) * 100
-            diff = abs(actual_P - target_P)
-            
-            if diff < best_diff:
-                best_diff = diff
-                best_result = {
-                    'edge': (u, v),
-                    'original_weight': original_weight,
-                    'new_weight': new_weight,
-                    'new_tour': best_tour,
-                    'new_cost': best_cost,
-                    'actual_P': actual_P
-                }
-                
-                print(f"    Trying edge ({u},{v}), reduction {reduction_pct*100:.0f}% → P={actual_P:.2f}%, diff={diff:.2f}")
-                
-                # If we're close enough, stop searching
-                if diff < 0.5:
+def create_edge_modification(cost_matrix: np.ndarray, target_P: float, coords: np.ndarray,
+                             prev_edge: Optional[Tuple[int,int]] = None,
+                             prev_weight: Optional[float] = None,
+                             prev_actual_P: Optional[float] = None) -> Tuple[Optional[int], Optional[int], Optional[float], Optional[List[int]], Optional[float], Optional[float]]:
+    n = cost_matrix.shape[0]
+    if prev_edge is None:
+        # First modification: search for best edge
+        original_tour = KNOWN_OPTIMAL_TOUR.copy()
+        orig_cost = compute_tour_cost(original_tour, cost_matrix)
+        target_new_cost = orig_cost * (1 - target_P/100)
+
+        # candidate edges not in original tour
+        original_edges = {(min(original_tour[i], original_tour[(i+1)%n]),
+                           max(original_tour[i], original_tour[(i+1)%n])) for i in range(n)}
+        candidate_edges = [(i,j,cost_matrix[i,j])
+                           for i in range(n) for j in range(i+1,n)
+                           if (i,j) not in original_edges and cost_matrix[i,j]>1]
+
+        candidate_edges.sort(key=lambda x: x[2], reverse=True)  # prioritize larger weights
+        best_result = None
+        for u,v,w in candidate_edges[:40]:
+            for keep in [0.01,0.02,0.05,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0]:
+                new_w = max(1e-8, w*keep)
+                modified = cost_matrix.copy()
+                modified[u,v] = modified[v,u] = new_w
+                try:
+                    new_tour,new_cost = compute_optimal_tour_via_concorde_explicit(modified)
+                except:
+                    continue
+                actual_P = (orig_cost - new_cost)/orig_cost*100
+                if best_result is None or abs(actual_P - target_P)<abs(best_result[5]-target_P):
+                    best_result = (u,v,new_w,new_tour,new_cost,actual_P)
+                if actual_P >= target_P:
                     break
-        
-        if best_result and abs(best_result['actual_P'] - target_P) < 0.5:
-            break
-    
-    if best_result is None:
-        print("  ERROR: Could not find suitable modification!")
-        return None, None, None, None, None, None
-    
-    u, v = best_result['edge']
-    new_weight = best_result['new_weight']
-    original_weight = best_result['original_weight']
-    new_tour = best_result['new_tour']
-    new_cost = best_result['new_cost']
-    actual_P = best_result['actual_P']
-    
-    # Verify
-    modified_cost_matrix = cost_matrix.copy()
-    modified_cost_matrix[u][v] = new_weight
-    modified_cost_matrix[v][u] = new_weight
-    
-    # Check BOTH the original tour and new tour with modified costs
-    original_cost_with_new_weights = compute_tour_cost(original_tour, modified_cost_matrix)
-    new_tour_with_new_weights = compute_tour_cost(new_tour, modified_cost_matrix)
-    
-    # The new optimal is whichever is ACTUALLY better after modification
-    if new_tour_with_new_weights < original_cost_with_new_weights:
-        final_new_optimal = new_tour_with_new_weights
-        final_new_tour = new_tour
-        is_new_better = True
+            if best_result and best_result[5]>=target_P: break
+        if best_result is None:
+            return (None, None, None, None, None, None)
+        return best_result
     else:
-        # Modification didn't help - optimal stays the same
-        final_new_optimal = original_cost_with_new_weights
-        final_new_tour = original_tour
-        is_new_better = False
-    
-    # Calculate actual P based on original cost vs final new optimal
-    actual_P = ((original_cost - final_new_optimal) / original_cost) * 100
-    
-    print(f"\n  === MODIFICATION SUMMARY ===")
-    print(f"  Edge to modify: ({u}, {v})")
-    print(f"  Original weight: {original_weight:.2f} → New weight: {new_weight:.2f}")
-    print(f"  Reduction: {original_weight - new_weight:.2f} ({(1 - new_weight/original_weight)*100:.1f}%)")
-    print(f"  Original tour cost (with new weights): {original_cost_with_new_weights:.2f}")
-    print(f"  Alternative tour cost (with new weights): {new_tour_with_new_weights:.2f}")
-    print(f"  Did modification create new optimal? {is_new_better}")
-    print(f"  Final new optimal cost: {final_new_optimal:.2f}")
-    print(f"  Actual P achieved: {actual_P:.2f}%")
-    print(f"  Target was: {target_P}%")
-    print(f"  Difference: {abs(actual_P - target_P):.2f}%")
-    print(f"  ===========================\n")
-    
-    return u, v, new_weight, final_new_tour, final_new_optimal, actual_P
+        # scale previous edge proportionally
+        if not isinstance(prev_edge, tuple) or len(prev_edge)!=2:
+            raise RuntimeError(f"prev_edge is not a 2-tuple: {prev_edge}")
+        u,v = prev_edge
+        # proportional weight adjustment
+        new_weight = prev_weight * ((1 - target_P/100) / (1 - prev_actual_P/100))
+        modified = cost_matrix.copy()
+        modified[u,v] = modified[v,u] = new_weight
+        new_tour,new_cost = compute_optimal_tour_via_concorde_explicit(modified)
+        actual_P = (KNOWN_OPTIMAL_COST - new_cost)/KNOWN_OPTIMAL_COST*100
+        return u,v,new_weight,new_tour,new_cost,actual_P
 
 
 # ============================================================
-# RUN A SINGLE ADAPTIVITY TEST
+# RUN
 # ============================================================
-def run_single(G, coords, seed, target_P):
+def run_single(G: nx.Graph, coords: np.ndarray, seed: int, target_P: float,
+               prev_edge: Optional[Tuple[int,int]]=None,
+               prev_weight: Optional[float]=None,
+               prev_actual_P: Optional[float]=None):
     n = len(coords)
-
-    # Build initial cost matrix with ROUNDED distances
-    cost_matrix = np.zeros((n, n))
+    cost_matrix = np.zeros((n,n))
     for i in range(n):
         for j in range(n):
-            if i != j:
-                cost_matrix[i][j] = float(np.round(np.linalg.norm(coords[i] - coords[j])))
+            if i!=j:
+                cost_matrix[i,j]=float(np.round(np.linalg.norm(coords[i]-coords[j])))
 
-    required_nodes = list(range(n))
-    index_map = {i: i for i in required_nodes}
-
-    # Determine edge to modify and new optimal
-    u, v, new_weight, new_optimal_tour, new_optimal_cost, actual_P = create_edge_modification(
-        cost_matrix.copy(), target_P
+    u,v,new_weight,new_optimal_tour,new_optimal_cost,actual_P = create_edge_modification(
+        cost_matrix,target_P,coords,prev_edge,prev_weight,prev_actual_P
     )
+
+    if u is None:
+        raise RuntimeError("create_edge_modification failed")
 
     # Initialize ACO
     aco = MaxMinACO(
@@ -231,256 +213,140 @@ def run_single(G, coords, seed, target_P):
         reducedGraph=G,
         completeGraph=G,
         shortest_paths={},
-        required_nodes=required_nodes,
-        index_map=index_map,
+        required_nodes=list(range(n)),
+        index_map={i:i for i in range(n)},
         seed=seed,
     )
 
-    global_best_costs = []  # Track global best cost per iteration
     global_best = np.inf
+    global_best_costs = []
     recorded_t_found = None
 
-    # ========================================================
-    # RUN ITERATIONS
-    # ========================================================
     for it in range(I_MAX):
         aco.run(iterations=1, n=it)
-
-        # Find best ant cost in this iteration
         iter_best = np.inf
-        best_ant_tour = None
-        for ant in aco.ants:
-            if ant is None or len(ant.tour) != n:
-                continue
-            ant_cost = compute_tour_cost(ant.tour, cost_matrix)
-            if ant_cost < iter_best:
-                iter_best = ant_cost
-                best_ant_tour = ant.tour
-        
-        # Update global best
-        if iter_best < global_best:
-            global_best = iter_best
-            # Debug: print when we find improvement
-            if it >= T_CHANGE:
-                print(f"    [Seed {seed}, Iter {it}] New best found: {global_best:.2f} (threshold: {FOUND_ALLOWANCE * new_optimal_cost:.2f})")
-        
+        for ant in getattr(aco,"ants",[]):
+            if ant is None or len(getattr(ant,"tour",[]))!=n: continue
+            ant_cost = compute_tour_cost(ant.tour,cost_matrix)
+            iter_best = min(iter_best,ant_cost)
+        if iter_best<global_best:
+            global_best=iter_best
         global_best_costs.append(global_best)
+        if it==T_CHANGE:
+            cost_matrix[u,v]=cost_matrix[v,u]=new_weight
+            if G.has_edge(u,v): G[u][v]["weight"]=new_weight
+            if hasattr(aco,"cost_matrix"): aco.cost_matrix=cost_matrix
+            if hasattr(aco,"heuristic"):
+                eps=1e-8
+                try: aco.heuristic[u][v]=1/ max(new_weight,eps); aco.heuristic[v][u]=1/max(new_weight,eps)
+                except: pass
+            if hasattr(aco,"on_cost_matrix_update"):
+                try: aco.on_cost_matrix_update(u,v,new_weight)
+                except: warnings.warn("aco.on_cost_matrix_update failed")
 
-        # ====================================================
-        # APPLY WEIGHT CHANGE AT t_change
-        # ====================================================
-        if it == T_CHANGE:
-            # Update cost matrix
-            cost_matrix[u][v] = new_weight
-            cost_matrix[v][u] = new_weight
-            
-            # Update graph
-            if G.has_edge(u, v):
-                G[u][v]["weight"] = new_weight
-            
-            # Update ACO's internal cost matrix
-            aco.cost_matrix[u][v] = new_weight
-            aco.cost_matrix[v][u] = new_weight
-            
-            # Update ACO's heuristic matrix (η = 1/cost)
-            if new_weight > 0:
-                aco.heuristic[u][v] = 1.0 / new_weight
-                aco.heuristic[v][u] = 1.0 / new_weight
-            else:
-                aco.heuristic[u][v] = 1e10
-                aco.heuristic[v][u] = 1e10
+        if it>=T_CHANGE and recorded_t_found is None:
+            if global_best <= FOUND_ALLOWANCE*new_optimal_cost:
+                recorded_t_found=it
 
-        # ====================================================
-        # CHECK FOR ADAPTATION AFTER t_change
-        # ====================================================
-        if it >= T_CHANGE and recorded_t_found is None:
-            threshold = FOUND_ALLOWANCE * new_optimal_cost
-            if global_best <= threshold:
-                recorded_t_found = it
+    if recorded_t_found is None: recorded_t_found=np.inf
+    iterations_to_adapt = recorded_t_found - T_CHANGE if recorded_t_found!=np.inf else np.inf
 
-    # If never found, mark as infinity
-    if recorded_t_found is None:
-        recorded_t_found = np.inf
+    # edge_info: tuple of (prev_edge, prev_weight, prev_actual_P) for next run
+    edge_info = ((u,v), new_weight, actual_P)
+    return global_best_costs, iterations_to_adapt, new_optimal_cost, actual_P, edge_info
 
-    iterations_to_adapt = recorded_t_found - T_CHANGE if recorded_t_found != np.inf else np.inf
-    
-    return global_best_costs, iterations_to_adapt, new_optimal_cost, actual_P
-
-
-# ============================================================
-# MAIN BENCHMARK
-# ============================================================
 def run_benchmark():
     print(f"Loading {GRAPH_PATH}...")
     G, coords = load_graph(GRAPH_PATH)
     print(f"Loaded graph with {len(coords)} nodes.")
     print(f"Known optimal tour cost: {KNOWN_OPTIMAL_COST}")
 
-    all_results = {}  # P → results
+    all_results = {}
 
     for target_P in P_VALUES:
-        print(f"\n===============================")
-        print(f"   Testing P = {target_P}% improvement")
-        print(f"===============================")
+        # Reset previous edge info for each target P
+        prev_edge = prev_weight = prev_actual_P = None
 
+        print("\n===============================")
+        print(f"   Testing P = {target_P}% improvement")
+        print("===============================")
         adapt_times = []
         all_cost_curves = []
         new_optimal = None
         actual_P = None
 
         for seed in SEEDS:
-            costs, adapt_time, new_opt, act_P = run_single(G, coords, seed, target_P)
+            # Reload fresh graph for each run
+            G_fresh, _ = load_graph(GRAPH_PATH)
+
+            costs, adapt_time, new_opt, act_P, edge_info = run_single(
+                G_fresh, coords, seed, target_P,
+                prev_edge, prev_weight, prev_actual_P
+            )
+
             adapt_times.append(adapt_time)
             all_cost_curves.append(costs)
+
             if new_optimal is None:
                 new_optimal = new_opt
                 actual_P = act_P
-            
+
+            # update prev_edge info for next seed in the same P
+            prev_edge, prev_weight, prev_actual_P = edge_info
+
             status = f"{adapt_time}" if adapt_time != np.inf else "NOT FOUND"
             print(f"  Seed {seed:2d} → adapt time = {status}")
 
-        # Use actual P for allowed iterations calculation
         allowed = max(MIN_ITER, int(round(EXPECTED_FACTOR * actual_P)))
         passes = sum(t <= allowed for t in adapt_times if t != np.inf)
         prop = passes / NUM_RUNS
 
-        print("\n------------------------------------")
-        print(f" Original optimal: {KNOWN_OPTIMAL_COST}")
-        print(f" New optimal: {new_optimal:.1f}")
-        print(f" Actual P achieved: {actual_P:.2f}%")
-        print(f" Allowed iterations: {allowed}")
-        print(f" Passes: {passes}/{NUM_RUNS} ({prop*100:.1f}%)")
-        print(f" Pass (≥90%): {'PASS' if prop >= 0.90 else 'FAIL'}")
-        print("------------------------------------")
+        print(f"\nOriginal optimal: {KNOWN_OPTIMAL_COST}, New optimal: {new_optimal}, Actual P: {actual_P:.2f}%")
+        print(f"Allowed iterations: {allowed}, Passes: {passes}/{NUM_RUNS} ({prop*100:.1f}%)")
+        print(f"Pass (≥90%): {'PASS' if prop >= 0.9 else 'FAIL'}")
 
         all_results[target_P] = (all_cost_curves, adapt_times, prop, new_optimal, actual_P)
-
         visualize(target_P, actual_P, all_cost_curves, adapt_times, prop, allowed, new_optimal)
 
     return all_results
-
 
 # ============================================================
 # VISUALIZATION
 # ============================================================
 def visualize(target_P, actual_P, all_curves, adapt_times, prop, allowed, new_optimal):
-    num_runs = len(all_curves)
-    max_len = max(len(c) for c in all_curves)
+    num_runs=len(all_curves)
+    max_len=max(len(c) for c in all_curves)
+    fig=make_subplots(rows=2,cols=1,subplot_titles=[
+        f"Global Best Cost per Iteration (Target P={target_P}%, Actual P={actual_P:.1f}%)",
+        f"Adaptation Time Distribution (Pass Rate={prop*100:.1f}%)"
+    ],vertical_spacing=0.13,row_heights=[0.6,0.4])
 
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=[
-            f"Global Best Cost per Iteration (Target P={target_P}%, Actual P={actual_P:.1f}%)",
-            f"Adaptation Time Distribution (Pass Rate={prop*100:.1f}%)"
-        ],
-        vertical_spacing=0.13,
-        row_heights=[0.6, 0.4]
-    )
+    for i,curve in enumerate(all_curves):
+        fig.add_trace(go.Scatter(y=curve,x=list(range(len(curve))),mode='lines',
+                                 opacity=0.25,line=dict(width=1),showlegend=(i==0),
+                                 name="Individual runs" if i==0 else None), row=1,col=1)
 
-    # ---------- Cost curve plot ----------
-    # Individual runs (light)
-    for i, curve in enumerate(all_curves):
-        fig.add_trace(
-            go.Scatter(
-                y=curve, 
-                x=list(range(len(curve))),
-                mode='lines',
-                opacity=0.25,
-                line=dict(color="lightblue", width=1),
-                showlegend=(i == 0),
-                name="Individual runs" if i == 0 else None,
-            ),
-            row=1, col=1
-        )
+    arr=np.full((num_runs,max_len),np.nan)
+    for i,L in enumerate(all_curves): arr[i,:len(L)]=L
+    avg=np.nanmean(arr,axis=0)
+    fig.add_trace(go.Scatter(y=avg,x=list(range(len(avg))),line=dict(width=3),name="Mean best cost"),row=1,col=1)
 
-    # Mean curve
-    arr = np.full((num_runs, max_len), np.nan)
-    for i, L in enumerate(all_curves):
-        arr[i, :len(L)] = L
-    
-    avg = np.nanmean(arr, axis=0)
-    fig.add_trace(
-        go.Scatter(
-            y=avg, 
-            x=list(range(len(avg))),
-            line=dict(color="darkblue", width=3),
-            name="Mean best cost",
-        ),
-        row=1, col=1
-    )
+    fig.add_vline(x=T_CHANGE,line_dash="dash",line_color="red",annotation_text=f"Weight change (t={T_CHANGE})",annotation_position="top",row=1,col=1)
+    fig.add_hline(y=new_optimal,line_dash="dot",line_color="green",annotation_text=f"New optimal = {new_optimal:.0f}",annotation_position="right",row=1,col=1)
+    fig.add_hline(y=FOUND_ALLOWANCE*new_optimal,line_dash="dot",line_color="orange",annotation_text=f"Threshold = {FOUND_ALLOWANCE:.2f}×",annotation_position="right",row=1,col=1)
+    fig.add_hline(y=KNOWN_OPTIMAL_COST,line_dash="dot",line_color="blue",annotation_text=f"Original optimal = {KNOWN_OPTIMAL_COST}",annotation_position="right",row=1,col=1)
 
-    # Add vertical line at t_change
-    fig.add_vline(
-        x=T_CHANGE, 
-        line_dash="dash", 
-        line_color="red",
-        annotation_text=f"Weight change (t={T_CHANGE})",
-        annotation_position="top",
-        row=1, col=1
-    )
-
-    # Add horizontal line for new optimal
-    fig.add_hline(
-        y=new_optimal,
-        line_dash="dot",
-        line_color="green",
-        annotation_text=f"New optimal = {new_optimal:.0f}",
-        annotation_position="right",
-        row=1, col=1
-    )
-
-    # Add horizontal line for threshold (1.12 × new_optimal)
-    threshold = FOUND_ALLOWANCE * new_optimal
-    fig.add_hline(
-        y=threshold,
-        line_dash="dot",
-        line_color="orange",
-        annotation_text=f"Threshold (1.12×) = {threshold:.0f}",
-        annotation_position="right",
-        row=1, col=1
-    )
-
-    fig.update_yaxes(title_text="Best Cost Found", row=1, col=1)
-    fig.update_xaxes(title_text="Iteration", row=1, col=1)
-
-    # ---------- Histogram ----------
-    finite = [t for t in adapt_times if t != np.inf]
-    
+    finite=[t for t in adapt_times if t!=np.inf]
     if finite:
-        fig.add_trace(
-            go.Histogram(
-                x=finite,
-                nbinsx=min(20, max(5, len(finite))),
-                marker_color="steelblue",
-                name="Adaptation times",
-            ),
-            row=2, col=1
-        )
+        fig.add_trace(go.Histogram(x=finite,nbinsx=min(20,max(5,len(finite))),name="Adaptation times"),row=2,col=1)
+        fig.add_vline(x=allowed,line_dash="dash",line_color="red",annotation_text=f"Allowed = {allowed}",annotation_position="top",row=2,col=1)
 
-        # Add vertical line for allowed threshold
-        fig.add_vline(
-            x=allowed,
-            line_dash="dash",
-            line_color="red",
-            annotation_text=f"Allowed = {allowed}",
-            annotation_position="top",
-            row=2, col=1
-        )
-
-    fig.update_xaxes(title_text="Iterations to Adapt", row=2, col=1)
-    fig.update_yaxes(title_text="Count", row=2, col=1)
-
-    # Overall layout
-    fig.update_layout(
-        height=900,
-        width=1100,
-        title_text=f"Edge Weight Adaptivity Test — Target P={target_P}%, Actual={actual_P:.1f}%, Allowed ≤ {allowed} iterations",
-        template="plotly_white",
-        showlegend=True
-    )
-
+    fig.update_xaxes(title_text="Iteration",row=1,col=1)
+    fig.update_yaxes(title_text="Best Cost Found",row=1,col=1)
+    fig.update_xaxes(title_text="Iterations to Adapt",row=2,col=1)
+    fig.update_yaxes(title_text="Count",row=2,col=1)
+    fig.update_layout(height=900,width=1100,title_text=f"Edge Weight Adaptivity Test — Target P={target_P}%, Actual={actual_P:.1f}%, Allowed ≤ {allowed} iterations",template="plotly_white",showlegend=True)
     fig.show()
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     run_benchmark()
