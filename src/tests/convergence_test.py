@@ -5,6 +5,7 @@ import networkx as nx
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.aco.engine import MaxMinACO
+import plotly.io as pio
 
 # ============================================================
 # CONFIG
@@ -17,6 +18,7 @@ SEEDS = list(range(1, NUM_RUNS + 1))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GRAPH_PATH = os.path.join(BASE_DIR, "..", "tsplib_graphs", "bier127.pkl")
+pio.renderers.default = "browser"
 
 # ============================================================
 # LOAD GRAPH
@@ -226,9 +228,5 @@ def visualize(all_mean_costs, all_tconv, proportion_pass):
 
     fig.show()
 
-
-# ============================================================
-# ENTRY
-# ============================================================
 if __name__ == "__main__":
     run_benchmark()

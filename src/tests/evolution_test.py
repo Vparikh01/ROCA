@@ -4,14 +4,15 @@ from pathlib import Path
 import numpy as np
 import networkx as nx
 from itertools import permutations
-import matplotlib.pyplot as plt
+import plotly as plt
 from src.aco.engine import MaxMinACO
+import plotly.io as pio
 
 # ------------------ Configuration ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TSPLIB_PKL_PATH = os.path.join(BASE_DIR, "..", "tsplib_graphs", "bier127.pkl")
 
-NUM_RUNS = 10
+NUM_RUNS = 2
 NUM_ITERATIONS = 200
 SEEDS = list(range(1, NUM_RUNS + 1))
 
@@ -33,6 +34,7 @@ TSPLIB_OPTIMAL = {
 }
 
 FORCE_OPTIMAL_COST = float(TSPLIB_OPTIMAL.get(Path(TSPLIB_PKL_PATH).stem, np.nan))
+pio.renderers.default = "browser"
 
 # ------------------ Helpers -------------------
 def load_tsplib_graph(pkl_path):

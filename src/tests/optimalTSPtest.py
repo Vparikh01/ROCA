@@ -7,6 +7,7 @@ from itertools import permutations
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.aco.engine import MaxMinACO
+import plotly.io as pio
 
 # ------------------ Configuration ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,7 @@ TSPLIB_OPTIMAL = {
     'fl1400': 20127,
     # 'pla85900': 142382641,  # skip if strictly ≤2000 nodes
 }
+pio.renderers.default = "browser"
 
 FORCE_OPTIMAL_COST = float(TSPLIB_OPTIMAL.get(Path(TSPLIB_PKL_PATH).stem, np.nan))  # set to None to compute
 

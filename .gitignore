@@ -229,3 +229,8 @@ data/raw/
 # macOS system files
 .DS_Store
 src/.DS_Store
+
+#Concorde TSP Solver debug
+.res
+.sol
+.pul
