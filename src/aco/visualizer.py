@@ -1,5 +1,8 @@
 # ----------------- visualizer.py -----------------
 import plotly.graph_objects as go
+import plotly.io as pio
+
+pio.renderers.default = "browser"
 
 def draw_aco_graph(
     G, pos, iteration_paths, final_best_path=None,

@@ -5,9 +5,10 @@ import networkx as nx
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.aco.engine import MaxMinACO
+import plotly.io as pio
 
 # ---------------- CONFIG ----------------
-NUM_RUNS = 4
+NUM_RUNS = 1
 I_MAX = 200
 H_WINDOW = 20
 CV_THRESH = 0.25
@@ -15,6 +16,7 @@ DELTA_FACTOR = 0.05
 SEEDS = list(range(1, NUM_RUNS+1))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GRAPH_PATH = os.path.join(BASE_DIR, "..", "tsplib_graphs", "bier127.pkl")
+pio.renderers.default = "browser"
 
 # ---------------- LOAD GRAPH ----------------
 def load_graph(pkl_path):
