@@ -6,6 +6,7 @@ import networkx as nx
 from itertools import permutations
 import plotly as plt
 from src.aco.engine import MaxMinACO
+import plotly.io as pio
 
 # ------------------ Configuration ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +34,7 @@ TSPLIB_OPTIMAL = {
 }
 
 FORCE_OPTIMAL_COST = float(TSPLIB_OPTIMAL.get(Path(TSPLIB_PKL_PATH).stem, np.nan))
+pio.renderers.default = "browser"
 
 # ------------------ Helpers -------------------
 def load_tsplib_graph(pkl_path):
