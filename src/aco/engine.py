@@ -3,6 +3,7 @@ import networkx as nx
 from src.aco.pheromones import PheromoneMatrix
 from src.nlp.negative_intents import NegativeIntentMatrix
 from src.nlp.positive_intents import PositiveIntentMatrix
+from src.rl.edgeQ import EdgeQ
 from src.aco.ant import Ant
 from src.aco.config import load_config
 from src.nlp.context_encoder import process_instruction
@@ -14,7 +15,7 @@ from src.aco.astar import inclusion_filter
 cfg = load_config()
 
 class MaxMinACO:
-    def __init__(self, cost_matrix, start_node, reducedGraph, completeGraph, shortest_paths, required_nodes, index_map, seed=None):
+    def __init__(self, cost_matrix, start_node, reducedGraph, completeGraph, shortest_paths, required_nodes, index_map, isQlearning, seed=None):
         self.ITERATION_BEST_RATIO = 0.325
         self.cost_matrix = cost_matrix
         self.start_node = start_node
@@ -24,6 +25,7 @@ class MaxMinACO:
         self.beta = cfg["beta"]
         self.seed = seed if seed is not None else cfg["seed"] or 0
         self.total_iterations = 0
+        self.Qlearner = EdgeQ(self.num_nodes, alpha=0.1, gamma=0.9, n_step=3) if isQlearning else None
 
         # Macro-evolution / population settings (config override)
         self.macro_iter_size = cfg.get("macro_iter_size", 20)
@@ -67,6 +69,7 @@ class MaxMinACO:
             Ant(
                 start_node=self.start_node,
                 num_nodes=self.num_nodes,
+                Qlearner=self.Qlearner,
                 graph=reducedGraph,
                 seed=self.seed + i
             )
@@ -480,6 +483,7 @@ class MaxMinACO:
             # Reset all ants at the start of each iteration
             for ant in self.ants:
                 ant.reset()
+                ant.update_lambda() # update lambda_q for Q-learning
 
             # Track whether ants have completed their tour
             unfinished_ants = np.array([True] * self.num_ants)
@@ -493,6 +497,7 @@ class MaxMinACO:
                     break  # all ants finished early
 
                 for ant in active_ants:
+                    prev_node = ant.current_node
                     # Choose next node vectorized internally
                     if self.negative_intent is not None:
                         modifier = self.confidence
@@ -512,7 +517,11 @@ class MaxMinACO:
                         )
                     else:
                         ant.choose_next_node(self.pheromones.matrix, self.heuristic)
-
+                    new_node = ant.current_node
+                    if self.Qlearner is not None and prev_node != new_node:
+                        cost = self.cost_matrix[prev_node, new_node]
+                        if np.isfinite(cost):
+                            self.Qlearner.observe(prev_node, new_node, cost)                 
                 # Update unfinished_ants mask
                 for idx, ant in enumerate(self.ants):
                     if len(ant.tour) >= self.num_nodes:
@@ -559,6 +568,10 @@ class MaxMinACO:
                 self.pheromones.deposit(self.best_tour, self.best_length)
             else:
                 print(f"Warning: No valid tours found in iteration {iteration}")
+            
+            # --- qlearning episodic reset ---
+            if self.Qlearner is not None:
+                self.Qlearner.flush()   
             
             # --- macro-evolution trigger ---
             if self.total_iterations % self.macro_iter_size == 0:

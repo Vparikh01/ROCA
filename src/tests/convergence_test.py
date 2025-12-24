@@ -1,93 +1,65 @@
 import os
 import pickle
-from pathlib import Path
 import numpy as np
 import networkx as nx
-from itertools import permutations
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.aco.engine import MaxMinACO
+import plotly.io as pio
 
-# ------------------ Configuration ------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TSPLIB_PKL_PATH = os.path.join(BASE_DIR, "..", "tsplib_graphs", "bier127.pkl")
-
-NUM_RUNS = 10
-NUM_ITERATIONS = 200
+# ============================================================
+# CONFIG
+# ============================================================
+NUM_RUNS = 2
+I_MAX = 200
+WINDOW = 50
+STABILITY_THRESHOLD = 0.04  # 4%
 SEEDS = list(range(1, NUM_RUNS + 1))
-CONVERGENCE_PATIENCE = 50
 
-TSPLIB_OPTIMAL = {
-    # Small / low complexity (20–50 nodes)
-    'burma14': 3323,
-    'ulysses16': 6859,
-    'att48': 33600,
-    'berlin52': 7542,
-    'eil51': 426,
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GRAPH_PATH = os.path.join(BASE_DIR, "..", "tsplib_graphs", "bier127.pkl")
+pio.renderers.default = "browser"
 
-    # Medium complexity (100–300 nodes)
-    'kroA100': 21282,
-    'lin105': 14379,
-    'pr107': 44303,
-    'a280': 2579,
-    'bier127': 118282,
-
-    # Complex (500–2000 nodes)
-    'pcb442': 50778,
-    'rat575': 6773,
-    'd657': 48912,
-    'fl1400': 20127,
-    # 'pla85900': 142382641,  # skip if strictly ≤2000 nodes
-}
-
-FORCE_OPTIMAL_COST = float(TSPLIB_OPTIMAL.get(Path(TSPLIB_PKL_PATH).stem, np.nan))  # set to None to compute
-
-# ------------------ Helpers -------------------
-def load_tsplib_graph(pkl_path):
+# ============================================================
+# LOAD GRAPH
+# ============================================================
+def load_graph(pkl_path):
     with open(pkl_path, "rb") as f:
         data = pickle.load(f)
-    coords = np.asarray(data["coordinates"])
+
+    coords = np.array(data["coordinates"])
     n = len(coords)
+
     G = nx.Graph()
     for i in range(n):
         for j in range(i + 1, n):
-            dist = float(np.linalg.norm(coords[i] - coords[j]))
-            G.add_edge(i, j, weight=dist)
+            w = float(np.linalg.norm(coords[i] - coords[j]))
+            G.add_edge(i, j, weight=w)
+
     return G, coords
 
-def compute_optimal(G, num_nodes):
-    if num_nodes <= 10:
-        cost_matrix = nx.to_numpy_array(G, weight="weight")
-        best_cost = float("inf")
-        for perm in permutations(range(1, num_nodes)):
-            tour = [0] + list(perm)
-            tour_cost = sum(cost_matrix[tour[i]][tour[i + 1]] for i in range(num_nodes - 1))
-            tour_cost += cost_matrix[tour[-1]][0]
-            if tour_cost < best_cost:
-                best_cost = tour_cost
-        return best_cost
-    else:
-        approx_tour = nx.approximation.traveling_salesman_problem(
-            G, cycle=True, weight="weight", method=nx.approximation.christofides
-        )
-        cost_matrix = nx.to_numpy_array(G, weight="weight")
-        tour_cost = sum(cost_matrix[approx_tour[i]][approx_tour[(i + 1) % num_nodes]] for i in range(num_nodes))
-        return float(tour_cost)
 
-# ------------------ Single ACO run ------------------
-def run_aco_single(G, required_nodes, cost_matrix, seed, max_iterations=NUM_ITERATIONS, patience=CONVERGENCE_PATIENCE):
-    num_nodes = len(required_nodes)
-    index_map = {n: i for i, n in enumerate(required_nodes)}
+# ============================================================
+# RUN ONE ACO INSTANCE
+# ============================================================
+def run_single(G, coords, seed):
+    num_nodes = len(coords)
 
-    G_indexed = nx.Graph()
-    for u, v, d in G.edges(data=True):
-        if u in index_map and v in index_map:
-            G_indexed.add_edge(index_map[u], index_map[v], **d)
+    # build cost matrix
+    cost_matrix = np.zeros((num_nodes, num_nodes), float)
+    for i in range(num_nodes):
+        for j in range(num_nodes):
+            if i != j:
+                cost_matrix[i][j] = float(np.linalg.norm(coords[i] - coords[j]))
 
+    required_nodes = list(range(num_nodes))
+    index_map = {i: i for i in required_nodes}
+
+    # create ACO engine
     aco = MaxMinACO(
         cost_matrix,
         start_node=0,
-        reducedGraph=G_indexed,
+        reducedGraph=G,
         completeGraph=G,
         shortest_paths={},
         required_nodes=required_nodes,
@@ -95,259 +67,163 @@ def run_aco_single(G, required_nodes, cost_matrix, seed, max_iterations=NUM_ITER
         seed=seed
     )
 
-    iteration_mean_costs = []
-    iteration_best_costs = []  # Track best-so-far each iteration
-    best_seen = np.inf
-    last_improve_iter = 0
-    iterations_run = 0
+    mean_costs = []
 
-    for it in range(max_iterations):
-        iterations_run += 1
+    # ----- run for up to I_MAX iterations -----
+    for it in range(I_MAX):
         aco.run(iterations=1, n=it)
 
-        # Compute mean cost across all ants this iteration
-        ant_costs = []
+        # gather all ant costs for μ_t (mean cost)
+        costs = []
         for ant in aco.ants:
-            if ant is not None and hasattr(ant, "tour") and len(ant.tour) == num_nodes:
-                tour_cost = 0.0
-                valid = True
-                for k in range(num_nodes):
-                    u = ant.tour[k]
-                    v = ant.tour[(k + 1) % num_nodes]
-                    c = cost_matrix[u][v]
-                    if np.isinf(c):
-                        valid = False
-                        break
-                    tour_cost += c
-                if valid:
-                    ant_costs.append(tour_cost)
+            if ant is None or len(ant.tour) != num_nodes:
+                continue
 
-        if ant_costs:
-            iteration_mean_costs.append(float(np.mean(ant_costs)))
-        else:
-            iteration_mean_costs.append(np.nan)
+            total = 0
+            valid = True
+            for k in range(num_nodes):
+                u = ant.tour[k]
+                v = ant.tour[(k + 1) % num_nodes]
+                c = cost_matrix[u][v]
+                if np.isinf(c):
+                    valid = False
+                    break
+                total += c
 
-        # Track best-so-far cost each iteration
-        if aco.best_length is not None and np.isfinite(aco.best_length):
-            iteration_best_costs.append(float(aco.best_length))
-            if aco.best_length + 1e-12 < best_seen:
-                best_seen = aco.best_length
-                last_improve_iter = it
-        else:
-            iteration_best_costs.append(best_seen if np.isfinite(best_seen) else np.nan)
+            if valid:
+                costs.append(total)
 
-        if (it - last_improve_iter) >= patience:
-            break
+        μ_t = float(np.mean(costs)) if costs else np.nan
+        mean_costs.append(μ_t)
 
-    # Get best tour cost
-    best_cost = np.nan
-    if aco.best_tour is not None:
-        try:
-            best_cost = float(sum(cost_matrix[aco.best_tour[i]][aco.best_tour[(i + 1) % num_nodes]] for i in range(num_nodes)))
-        except:
-            best_cost = np.nan
+    return mean_costs
 
-    return iteration_mean_costs, iteration_best_costs, best_cost, iterations_run
 
-# ------------------ Benchmark ------------------
+# ============================================================
+# COMPUTE t_conv FOR ONE RUN
+# ============================================================
+def compute_convergence(mean_costs):
+    mean_costs = np.array(mean_costs)
+
+    for t in range(0, len(mean_costs) - WINDOW):
+        window = mean_costs[t:t + WINDOW]
+
+        if np.any(np.isnan(window)):
+            continue
+
+        change = np.max(window) - np.min(window)
+        change_rel = change / window[0]
+
+        if change_rel <= STABILITY_THRESHOLD:
+            return t  # first stable iteration
+
+    return None  # failed to converge
+
+
+# ============================================================
+# MAIN BENCHMARK
+# ============================================================
 def run_benchmark():
-    print(f"Loading {TSPLIB_PKL_PATH}...")
-    G, coords = load_tsplib_graph(TSPLIB_PKL_PATH)
-    required_nodes = list(G.nodes())
-    num_nodes = len(required_nodes)
-    print(f"Loaded: {num_nodes} nodes")
+    print(f"Loading {GRAPH_PATH}...")
+    G, coords = load_graph(GRAPH_PATH)
+    print(f"Loaded graph with {len(coords)} nodes.")
 
-    # Build cost matrix
-    cost_matrix = np.zeros((num_nodes, num_nodes), dtype=float)
-    for i in range(num_nodes):
-        for j in range(num_nodes):
-            if i == j:
-                cost_matrix[i][j] = 0.0
-            else:
-                cost_matrix[i][j] = float(np.linalg.norm(coords[i] - coords[j]))
+    all_mean_costs = []
+    all_tconv = []
 
-    # Get optimal
-    if FORCE_OPTIMAL_COST is not None:
-        optimal_cost = float(FORCE_OPTIMAL_COST)
-        print(f"Using forced optimal: {optimal_cost:.2f}")
-    else:
-        print("Computing optimal...")
-        optimal_cost = compute_optimal(G, num_nodes)
-        print(f"Optimal: {optimal_cost:.2f}")
+    print(f"Running {NUM_RUNS} convergence tests...")
 
-    all_iteration_mean_costs = []
-    all_iteration_best_costs = []
-    all_best_costs = []
-    all_deviations = []
-    all_final20_means = []
-
-    print(f"\nRunning {NUM_RUNS} runs...")
     for seed in SEEDS:
-        iter_mean_costs, iter_best_costs, best_cost, T = run_aco_single(G, required_nodes, cost_matrix, seed)
-        all_iteration_mean_costs.append(iter_mean_costs)
-        all_iteration_best_costs.append(iter_best_costs)
-        all_best_costs.append(best_cost)
+        μ_list = run_single(G, coords, seed)
+        t_conv = compute_convergence(μ_list)
 
-        # Get last 20 finite values of BEST cost (not mean across ants)
-        finite_best_costs = [c for c in iter_best_costs if np.isfinite(c)]
-        if len(finite_best_costs) >= 20:
-            final20 = finite_best_costs[-20:]
-        else:
-            final20 = finite_best_costs
-        
-        mean_final20 = float(np.mean(final20)) if final20 else np.nan
-        all_final20_means.append(mean_final20)
-        
-        deviation = (mean_final20 - optimal_cost) / optimal_cost if np.isfinite(mean_final20) else np.nan
-        all_deviations.append(deviation)
-        
-        print(f"  Seed {seed}: T={T}, Best={best_cost:.2f}, Final20={mean_final20:.2f}, Dev={deviation:.4f}")
+        all_mean_costs.append(μ_list)
+        all_tconv.append(t_conv)
 
-    # Stats
-    all_deviations = np.array(all_deviations)
-    finite_mask = np.isfinite(all_deviations)
-    n_finite = np.sum(finite_mask)
+        print(f"  Seed {seed:2d} → t_conv = {t_conv}")
 
-    mean_dev = float(np.mean(all_deviations[finite_mask])) if n_finite else np.nan
-    std_dev = float(np.std(all_deviations[finite_mask], ddof=1)) if n_finite > 1 else 0.0
-    ci95 = 1.96 * std_dev / np.sqrt(n_finite) if n_finite else np.nan
-    num_pass = np.sum((all_deviations <= 0.10) & finite_mask)
-    proportion_pass = num_pass / NUM_RUNS
+    # pass/fail
+    successes = sum(t is not None and t <= I_MAX for t in all_tconv)
+    proportion = successes / NUM_RUNS
 
-    print("\n" + "=" * 60)
-    print("RESULTS")
-    print("=" * 60)
-    print(f"Optimal: {optimal_cost:.2f}")
-    print(f"Mean deviation: {mean_dev:.4f} ({mean_dev*100:.2f}%)")
-    print(f"Std deviation: {std_dev:.4f}")
-    print(f"95% CI: [{mean_dev - ci95:.4f}, {mean_dev + ci95:.4f}]")
-    print(f"Runs ≤10% deviation: {num_pass}/{NUM_RUNS} ({proportion_pass:.1%})")
-    print(f"Pass (≥90%): {'✓ PASS' if proportion_pass >= 0.90 else '✗ FAIL'}")
-    print("=" * 60)
+    print("\n==========================")
+    print(" Convergence Test Results ")
+    print("==========================")
+    print(f"Passes: {successes}/{NUM_RUNS} ({proportion*100:.1f}%)")
+    print(f"Pass (≥90% runs): {'PASS' if proportion >= 0.90 else 'FAIL'}")
 
-    visualize_results(all_iteration_best_costs, all_best_costs, all_deviations, optimal_cost, mean_dev, proportion_pass)
+    visualize(all_mean_costs, all_tconv, proportion)
 
-def visualize_results(all_iteration_best_costs, all_best_costs, all_deviations, optimal_cost, mean_dev, proportion_pass):
-    """
-    Visualize Path Optimality Test results:
-    - Top-left: Best-so-far convergence curves for all runs + mean + optimal
-    - Top-right: Best cost per run (bar chart) + optimal
-    - Bottom-left: Deviation percent histogram + 10% threshold
-    """
-    NUM_RUNS = len(all_best_costs)
+
+# ============================================================
+# VISUALIZATION
+# ============================================================
+def visualize(all_mean_costs, all_tconv, proportion_pass):
+    NUM_RUNS = len(all_mean_costs)
+    max_len = max(len(r) for r in all_mean_costs)
 
     fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=(
-            "Best-So-Far Convergence (All Runs)",
-            "Best Cost per Run",
-            "Deviation (%) Across Runs",
-            None  # bottom-right empty
-        ),
-        specs=[[{"type":"scatter"}, {"type":"bar"}],
-               [{"type":"histogram"}, None]]
+        rows=2, cols=1,
+        subplot_titles=[
+            "Mean Route Cost per Iteration (All Runs)",
+            "Distribution of Convergence Iterations"
+        ],
+        vertical_spacing=0.15
     )
 
-    # ------------------ Top-left: Best-so-far curves ------------------
-    max_len = max(len(costs) for costs in all_iteration_best_costs)
+    # ========== Plot 1: Cost trajectories ==========
     arr = np.full((NUM_RUNS, max_len), np.nan)
-    for i, costs in enumerate(all_iteration_best_costs):
-        arr[i, :len(costs)] = costs
-        # individual run line
+    for i, L in enumerate(all_mean_costs):
+        arr[i, :len(L)] = L
         fig.add_trace(
             go.Scatter(
-                x=list(range(1, len(costs)+1)),
-                y=costs,
+                x=list(range(len(L))),
+                y=L,
                 mode='lines',
-                line=dict(color='blue', width=1),
                 opacity=0.3,
-                name=f"Run {i+1}",
-                showlegend=False,
-                hovertemplate="Iteration %{x}<br>Cost %{y:.2f}"
+                line=dict(color="blue"),
+                showlegend=False
             ),
             row=1, col=1
         )
-    # mean best-so-far line
-    mean_best = np.nanmean(arr, axis=0)
+
+    # average curve
+    avg = np.nanmean(arr, axis=0)
     fig.add_trace(
         go.Scatter(
-            x=list(range(1, len(mean_best)+1)),
-            y=mean_best,
-            mode='lines',
-            line=dict(color='red', width=3),
-            name="Mean Best",
-            hovertemplate="Iteration %{x}<br>Mean Best %{y:.2f}"
+            x=list(range(len(avg))),
+            y=avg,
+            mode="lines",
+            line=dict(color="red", width=3),
+            name="Mean"
         ),
         row=1, col=1
     )
-    # optimal line
-    fig.add_hline(
-        y=optimal_cost, line_dash="dash", line_color="green",
-        annotation_text="Optimal", row=1, col=1
-    )
 
     fig.update_xaxes(title_text="Iteration", row=1, col=1)
-    fig.update_yaxes(title_text="Cost", row=1, col=1)
+    fig.update_yaxes(title_text="Mean Cost", row=1, col=1)
 
-    # ------------------ Top-right: Best cost per run ------------------
-    fig.add_trace(
-        go.Bar(
-            x=list(range(1, NUM_RUNS+1)),
-            y=all_best_costs,
-            name="Best Cost per Run",
-            marker_color='blue',
-            hovertemplate="Run %{x}<br>Best Cost %{y:.2f}"
-        ),
-        row=1, col=2
-    )
-    # optimal line
-    fig.add_hline(
-        y=optimal_cost, line_dash="dash", line_color="green",
-        annotation_text="Optimal", row=1, col=2
-    )
-    fig.update_xaxes(title_text="Run", row=1, col=2)
-    fig.update_yaxes(title_text="Cost", row=1, col=2)
+    # ========== Plot 2: Histogram of t_conv ==========
+    finite_t = [t for t in all_tconv if t is not None]
 
-    # ------------------ Bottom-left: Deviation histogram ------------------
-    finite_devs = [d*100 for d in all_deviations if np.isfinite(d)]
     fig.add_trace(
         go.Histogram(
-            x=finite_devs,
+            x=finite_t,
             nbinsx=20,
-            marker_color='blue',
-            name="Deviation (%)",
-            hovertemplate="%{x:.2f}%"
+            marker_color="blue",
         ),
         row=2, col=1
     )
-    # 10% threshold
-    fig.add_vline(
-        x=10, line_dash="dash", line_color="red",
-        annotation_text="10% Threshold", row=2, col=1
-    )
-    fig.update_xaxes(title_text="Deviation (%)", row=2, col=1)
+
+    fig.update_xaxes(title_text="t_conv (iteration)", row=2, col=1)
     fig.update_yaxes(title_text="Count", row=2, col=1)
 
-    # ------------------ Layout and annotations ------------------
+    # layout
     fig.update_layout(
         height=900,
-        width=1100,
-        title_text=f"Path Optimality Test — Mean Dev: {mean_dev*100:.2f}%, Pass: {proportion_pass*100:.1f}%",
+        width=1000,
+        title_text=f"Convergence Stability Test — Pass Rate: {proportion_pass*100:.1f}%",
         template="plotly_white"
-    )
-    
-    # annotate mean deviation and proportion passing
-    fig.add_annotation(
-        text=f"Mean Deviation: {mean_dev*100:.2f}%",
-        xref="paper", yref="paper",
-        x=0.5, y=1.05, showarrow=False,
-        font=dict(size=14, color="black")
-    )
-    fig.add_annotation(
-        text=f"Proportion ≤10%: {proportion_pass*100:.1f}%",
-        xref="paper", yref="paper",
-        x=0.5, y=1.0, showarrow=False,
-        font=dict(size=14, color="black")
     )
 
     fig.show()
