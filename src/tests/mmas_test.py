@@ -37,7 +37,7 @@ for i in range(num_nodes):
             G_indexed.add_edge(i, j, weight=cost_matrix[i][j])
 
 # ----------------- Run ACO -----------------
-aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed)
+aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed, completeGraph=G, shortest_paths={}, required_nodes=required_nodes, index_map={i:i for i in range(num_nodes)}, optimization_mode="evolution")
 NUM_ITERATIONS = 20
 iteration_paths = []
 

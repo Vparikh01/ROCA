@@ -64,6 +64,7 @@ def run_single(G, coords, seed):
         shortest_paths={},
         required_nodes=required_nodes,
         index_map=index_map,
+        optimization_mode="plain",
         seed=seed
     )
 
