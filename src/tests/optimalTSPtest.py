@@ -94,6 +94,7 @@ def run_aco_single(G, required_nodes, cost_matrix, seed, max_iterations=NUM_ITER
         shortest_paths={},
         required_nodes=required_nodes,
         index_map=index_map,
+        optimization_mode="evolution",
         seed=seed
     )
 

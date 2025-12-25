@@ -47,7 +47,7 @@ def run_single(G, coords, seed, i_max=I_MAX):
         cost_matrix, start_node=0,
         reducedGraph=G, completeGraph=G,
         shortest_paths={}, required_nodes=required_nodes,
-        index_map=index_map, seed=seed
+        index_map=index_map, optimization_mode="evolution", seed=seed
     )
 
     cv_list = []

@@ -17,6 +17,8 @@ class Ant:
         self.num_nodes = num_nodes
         self.alpha = cfg["alpha"]
         self.beta = cfg["beta"]
+        self.mew_alpha = 0.0   # log-space mean offset
+        self.mew_beta  = 0.0
         self.rng = np.random.default_rng(seed)
         self.Qlearner = Qlearner
         self.lambda_q = lambda_q
@@ -24,6 +26,7 @@ class Ant:
         self.max_iterations = iterations
         self.lambda_start = lambda_start
         self.lambda_end = lambda_end
+        self.tour_sum = 0.0
 
         # Precompute neighbors as NumPy arrays
         self.neighbor_indices = [
@@ -36,10 +39,14 @@ class Ant:
         self.lambda_q = self.lambda_start + frac * (self.lambda_end - self.lambda_start)
 
     def reset(self):
+        self.tour_sum += self.tour_length
         self.current_node = self.start_node
         self.tour = [self.start_node]
         self.visited = set([self.start_node])
         self.tour_length = 0
+        
+    def reset_tour_sum(self):
+        self.tour_sum = 0.0
 
     def choose_next_node(self, pheromone_matrix, heuristic_matrix, intent_matrix=None, upsilon=None):
         # Use precomputed neighbors

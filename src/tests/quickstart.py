@@ -42,6 +42,7 @@ aco = MaxMinACO(
     shortest_paths={},
     required_nodes=required_nodes,
     index_map=index_map,
+    optimization_mode="plain",
     seed=42
 )
 

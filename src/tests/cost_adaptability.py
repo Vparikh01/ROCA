@@ -366,6 +366,7 @@ def run_single_with_modifications(G: nx.Graph, coords: np.ndarray, seed: int,
         shortest_paths={},
         required_nodes=list(range(n)),
         index_map={i: i for i in range(n)},
+        optimization_mode="evolution",
         seed=seed,
     )
 

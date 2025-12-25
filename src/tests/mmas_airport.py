@@ -70,7 +70,7 @@ edge_weights = {
 }
 
 # ----------------- Run ACO -----------------
-aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed, completeGraph=G, shortest_paths=shortest_paths, required_nodes=required_nodes, index_map=index_map)
+aco = MaxMinACO(cost_matrix, start_node=0, reducedGraph=G_indexed, completeGraph=G, shortest_paths=shortest_paths, required_nodes=required_nodes, optimization_mode="evolution", index_map=index_map)
 NUM_ITERATIONS = 200
 iteration_paths = []
 pheromone_matrices = []
