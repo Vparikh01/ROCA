@@ -9,7 +9,7 @@ from src.aco.engine import MaxMinACO
 # ------------------ Configuration ------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TSPLIB_PKL_PATH = os.path.join(BASE_DIR, "..", "tsplib_graphs", "bier127.pkl")
-NUM_RUNS = 1
+NUM_RUNS = 10
 NUM_ITERATIONS = 200
 SEEDS = list(range(1, NUM_RUNS + 1))
 

@@ -2,7 +2,7 @@ import numpy as np
 from collections import deque
 
 class EdgeQ:
-    def __init__(self, n_nodes, alpha=0.1, gamma=0.65, n_step=0):
+    def __init__(self, n_nodes, avgCost, alpha=0.1, gamma=0.65, n_step=0):
         """
         n_nodes : number of cities
         alpha   : TD learning rate
@@ -15,14 +15,14 @@ class EdgeQ:
         self.n_step = n_step
 
         # Q-table: expected remaining cost after taking edge i -> j
-        self.Q = np.ones((n_nodes, n_nodes))
+        self.Q = np.ones((n_nodes, n_nodes)) * avgCost
         self.buffer = deque()
 
     def observe(self, i, j, cost):
         self.buffer.append((i, j, cost))
 
         # Perform TD(n) update if buffer is full
-        if len(self.buffer) >= self.n_step:
+        if len(self.buffer) > self.n_step:
             self._td_update()
 
     def _td_update(self):
@@ -35,10 +35,9 @@ class EdgeQ:
 
         i0, j0, _ = self.buffer[0]
 
-        # Bootstrap if buffer exactly n_step long
-        if len(self.buffer) == self.n_step:
-            inext, jnext, _ = self.buffer[-1]
-            G += (self.gamma ** self.n_step) * self.Q[inext][jnext]
+        if len(self.buffer) > self.n_step:  # When buffer has 4+
+            i_next, j_next, _ = self.buffer[self.n_step]  # Gets buffer[3]
+            G += (self.gamma ** self.n_step) * self.Q[i_next][j_next]
 
         # TD update
         self.Q[i0][j0] += self.alpha * (G - self.Q[i0][j0])
