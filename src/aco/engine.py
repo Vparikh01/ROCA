@@ -36,11 +36,13 @@ class MaxMinACO:
         self.seed = seed if seed is not None else cfg["seed"] or 0
         self.total_iterations = 0
         self.optimization_mode = optimization_mode
-        
+        avgCost = np.mean(cost_matrix[cost_matrix > 0]) if len(cost_matrix[cost_matrix > 0]) > 0 else 1.0
+        print(f"Average Cost: {avgCost}")
+
         # Initialize Q-learner if needed
         self.Qlearner = None
         if "qlearning" in optimization_mode:
-            self.Qlearner = EdgeQ(self.num_nodes, alpha=0.1, gamma=0.9, n_step=3)
+            self.Qlearner = EdgeQ(self.num_nodes, avgCost, alpha=0.1, gamma=0.9, n_step=3)
 
         # Macro-evolution / population settings
         self.macro_iter_size = cfg.get("macro_iter_size", 20)
